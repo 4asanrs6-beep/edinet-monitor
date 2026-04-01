@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.db
+*.log
+pdf_cache/
+config.yaml

@@ -1,0 +1,63 @@
+# ============================================
+# EDINET Monitor 設定ファイル
+# ============================================
+
+edinet:
+  # EDINET API サブスクリプションキー
+  # https://disclosure.edinet-fsa.go.jp/ で取得してください
+  api_key: ""
+
+  # API ベースURL
+  base_url: "https://api.edinet-fsa.go.jp/api/v2"
+
+  # ポーリング間隔 (秒) - 場外時の間隔
+  # 場中 (平日8:45-16:30) は自動でバーストモード
+  # (毎分55秒〜翌05秒に2秒間隔で5回ポーリング)
+  polling_interval_sec: 60
+
+  # APIリクエストタイムアウト (秒)
+  request_timeout_sec: 30
+
+  # エラー時リトライ回数
+  max_retries: 3
+
+  # リトライ間隔 (秒)
+  retry_interval_sec: 10
+
+monitoring:
+  # 監視対象カテゴリ (不要なものをコメントアウトで除外可)
+  enabled_categories:
+    - "大量保有報告書"
+    - "変更報告書"
+    - "増資"
+    - "CB/転換社債"
+    - "MSワラント"
+    - "第三者割当"
+    - "自己株取得"
+    - "公開買付"
+    - "主要株主異動"
+
+  # ウォッチリスト (証券コード4桁)
+  # ここに登録した銘柄は優先度が1段階上がる
+  watchlist_sec_codes: []
+  # 例:
+  # watchlist_sec_codes:
+  #   - "7203"
+  #   - "9984"
+
+  # 訂正書類をスキップするか
+  skip_corrections: true
+
+notification:
+  # デスクトップ通知の有効/無効
+  enabled: true
+
+  # 通知音
+  sound: true
+
+logging:
+  level: "INFO"
+
+gui:
+  window_width: 1200
+  window_height: 750
