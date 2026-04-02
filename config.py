@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "notification": {
         "enabled": True,
         "sound": True,
+        "max_priority_to_notify": 2,
     },
     "database": {
         "path": str(DEFAULT_DB_PATH),
