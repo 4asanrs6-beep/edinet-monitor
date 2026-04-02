@@ -46,6 +46,7 @@ class Storage:
                     subsidiary_name TEXT DEFAULT '',
                     event_category TEXT NOT NULL,
                     priority INTEGER NOT NULL DEFAULT 4,
+                    tag TEXT DEFAULT '',
                     is_read INTEGER NOT NULL DEFAULT 0,
                     memo TEXT DEFAULT '',
                     raw_json TEXT,
@@ -82,9 +83,17 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_log_timestamp
                     ON monitor_log(timestamp DESC);
             """)
+            self._migrate_documents_schema(conn)
             conn.commit()
         finally:
             conn.close()
+
+    def _migrate_documents_schema(self, conn: sqlite3.Connection):
+        """documents テーブルの後方互換マイグレーション."""
+        cols = conn.execute("PRAGMA table_info(documents)").fetchall()
+        col_names = {row["name"] for row in cols}
+        if "tag" not in col_names:
+            conn.execute("ALTER TABLE documents ADD COLUMN tag TEXT DEFAULT ''")
 
     # ===== EDINETコードリスト =====
 
