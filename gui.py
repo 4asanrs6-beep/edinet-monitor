@@ -61,6 +61,7 @@ class EdinetMonitorGUI:
         self._setup_root()
         self._setup_styles()
         self._create_widgets()
+        self._setup_copy_support()
         self._setup_tray()
 
         self.root.after(100, self._refresh_list)
@@ -217,6 +218,7 @@ class EdinetMonitorGUI:
 
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.bind("<Double-1>", self._on_tree_double_click)
+        self.tree.bind("<Control-c>", self._copy_selected_row)
 
     def _create_detail_view(self, parent):
         canvas = tk.Canvas(parent, highlightthickness=0)
@@ -263,13 +265,30 @@ class EdinetMonitorGUI:
         ]
 
         self.detail_labels = {}
+        multiline_heights = {
+            "filer": 2,
+            "issuer": 2,
+            "subject": 2,
+            "subsidiary": 2,
+            "description": 3,
+        }
         for i, (label_text, key) in enumerate(fields, start=2):
             ttk.Label(f, text=label_text, font=(self.jp_font, 10, "bold")).grid(
                 row=i, column=0, padx=(8, 4), pady=2, sticky=tk.NE
             )
-            lbl = ttk.Label(f, text="", wraplength=400)
-            lbl.grid(row=i, column=1, **pad)
-            self.detail_labels[key] = lbl
+            txt = tk.Text(
+                f,
+                height=multiline_heights.get(key, 1),
+                width=52,
+                wrap=tk.WORD,
+                font=(self.jp_font, 10),
+                relief=tk.FLAT,
+                highlightthickness=0,
+                borderwidth=0,
+            )
+            txt.grid(row=i, column=1, **pad)
+            txt.configure(state=tk.DISABLED)
+            self.detail_labels[key] = txt
 
         row = len(fields) + 2
 
@@ -277,8 +296,18 @@ class EdinetMonitorGUI:
         ttk.Label(f, text="提出理由:", font=(self.jp_font, 10, "bold")).grid(
             row=row, column=0, padx=(8, 4), pady=2, sticky=tk.NE
         )
-        self.detail_reason = ttk.Label(f, text="", wraplength=400)
+        self.detail_reason = tk.Text(
+            f,
+            height=3,
+            width=52,
+            wrap=tk.WORD,
+            font=(self.jp_font, 10),
+            relief=tk.FLAT,
+            highlightthickness=0,
+            borderwidth=0,
+        )
         self.detail_reason.grid(row=row, column=1, **pad)
+        self.detail_reason.configure(state=tk.DISABLED)
         row += 1
 
         ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=8)
@@ -388,6 +417,14 @@ class EdinetMonitorGUI:
             self._tray_available = False
             logger.warning("トレイアイコン初期化失敗: %s", e)
 
+    def _setup_copy_support(self):
+        """マウス/キーボードでのコピー操作を設定."""
+        self.copy_menu = tk.Menu(self.root, tearoff=0)
+        self.copy_menu.add_command(label="行をコピー", command=self._copy_selected_row)
+        self.copy_menu.add_command(label="セルをコピー", command=self._copy_cell_from_menu)
+        self.tree.bind("<Button-3>", self._show_tree_context_menu)
+        self._menu_copy_column = None
+
     # ===== イベントハンドラ =====
 
     def _on_tree_select(self, event):
@@ -401,6 +438,49 @@ class EdinetMonitorGUI:
 
     def _on_tree_double_click(self, event):
         self._toggle_read()
+
+    def _show_tree_context_menu(self, event):
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+        self.tree.selection_set(row_id)
+        self._menu_copy_column = self.tree.identify_column(event.x)
+        self.copy_menu.tk_popup(event.x_root, event.y_root)
+
+    def _copy_cell_from_menu(self):
+        self._copy_selected_row(column=self._menu_copy_column)
+
+    def _copy_selected_row(self, event=None, column: str = None):
+        selection = self.tree.selection()
+        if not selection:
+            return "break"
+        row = self.tree.item(selection[0], "values")
+        if not row:
+            return "break"
+
+        if column and column.startswith("#"):
+            idx = int(column[1:]) - 1
+            text = str(row[idx]) if 0 <= idx < len(row) else "\t".join(str(v) for v in row)
+        else:
+            text = "\t".join(str(v) for v in row)
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._update_status("running", "コピーしました")
+        return "break"
+
+    def _set_detail_text(self, key: str, value: str, fg: str = "#222222"):
+        widget = self.detail_labels[key]
+        widget.configure(state=tk.NORMAL, foreground=fg)
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", value or "")
+        widget.configure(state=tk.DISABLED)
+
+    def _set_reason_text(self, value: str):
+        self.detail_reason.configure(state=tk.NORMAL, foreground="#222222")
+        self.detail_reason.delete("1.0", tk.END)
+        self.detail_reason.insert("1.0", value or "")
+        self.detail_reason.configure(state=tk.DISABLED)
 
     def _on_filter_change(self):
         self.filter_category = self.category_var.get()
@@ -524,9 +604,9 @@ class EdinetMonitorGUI:
         self.detail_header.config(text=header)
 
         # 各フィールド
-        self.detail_labels["submit_time"].config(text=doc.submit_datetime)
-        self.detail_labels["filer"].config(text=doc.filer_name)
-        self.detail_labels["filer_ticker"].config(text=doc.ticker or "-")
+        self._set_detail_text("submit_time", doc.submit_datetime)
+        self._set_detail_text("filer", doc.filer_name)
+        self._set_detail_text("filer_ticker", doc.ticker or "-")
 
         # 発行会社
         issuer_text = "-"
@@ -536,7 +616,7 @@ class EdinetMonitorGUI:
                 issuer_text += f" ({doc.issuer_sec_code[:4]})"
         elif doc.issuer_edinet_code:
             issuer_text = f"[{doc.issuer_edinet_code}]"
-        self.detail_labels["issuer"].config(text=issuer_text)
+        self._set_detail_text("issuer", issuer_text)
 
         # 対象会社
         subject_text = "-"
@@ -546,24 +626,24 @@ class EdinetMonitorGUI:
                 subject_text += f" ({doc.subject_sec_code[:4]})"
         elif doc.subject_edinet_code:
             subject_text = f"[{doc.subject_edinet_code}]"
-        self.detail_labels["subject"].config(text=subject_text)
+        self._set_detail_text("subject", subject_text)
 
         # 子会社
         sub_text = doc.subsidiary_name or "-"
         if not doc.subsidiary_name and doc.subsidiary_edinet_code:
             sub_text = f"[{doc.subsidiary_edinet_code}]"
-        self.detail_labels["subsidiary"].config(text=sub_text)
+        self._set_detail_text("subsidiary", sub_text)
 
-        self.detail_labels["description"].config(text=doc.doc_description)
-        self.detail_labels["category"].config(text=doc.event_category)
-        self.detail_labels["edinet_code"].config(text=doc.edinet_code or "-")
-        self.detail_labels["ordinance_form"].config(text=f"{doc.ordinance_code or '-'} / {doc.form_code or '-'}")
+        self._set_detail_text("description", doc.doc_description)
+        self._set_detail_text("category", doc.event_category)
+        self._set_detail_text("edinet_code", doc.edinet_code or "-")
+        self._set_detail_text("ordinance_form", f"{doc.ordinance_code or '-'} / {doc.form_code or '-'}")
 
         p_label = doc.priority_label
         p_color = PRIORITY_COLORS.get(doc.priority, "#616161")
-        self.detail_labels["priority"].config(text=p_label, foreground=p_color)
+        self._set_detail_text("priority", p_label, fg=p_color)
 
-        self.detail_reason.config(text=doc.current_report_reason or "-")
+        self._set_reason_text(doc.current_report_reason or "-")
 
         self.memo_text.delete("1.0", tk.END)
         if doc.memo:
