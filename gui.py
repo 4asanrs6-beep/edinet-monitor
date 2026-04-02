@@ -18,7 +18,7 @@ import sys
 import threading
 import tkinter as tk
 import webbrowser
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
@@ -587,6 +587,8 @@ class EdinetMonitorGUI:
 
     def _quit(self):
         self.monitor.stop()
+        if hasattr(self, "screen_monitor") and self.screen_monitor:
+            self.screen_monitor.stop()
         if self._tray_available:
             try:
                 self.tray_icon.stop()
@@ -879,9 +881,13 @@ class EdinetMonitorGUI:
     def _toggle_monitor(self):
         if self.monitor.is_running:
             self.monitor.stop()
+            if hasattr(self, "screen_monitor") and self.screen_monitor:
+                self.screen_monitor.stop()
             self.monitor_btn_text.set("監視開始")
         else:
             self.monitor.start()
+            if hasattr(self, "screen_monitor") and self.screen_monitor:
+                self.screen_monitor.start()
             self.monitor_btn_text.set("監視停止")
 
     def _manual_poll(self):
@@ -911,8 +917,18 @@ class EdinetMonitorGUI:
 
         if msg_type == "new_docs":
             docs = msg[1]
+            queue_received_at = datetime.now().isoformat()
+            for doc in docs:
+                self.storage.record_document_event(doc, "gui_queue_received", event_at=queue_received_at)
             self._refresh_list()
-            self.notifier.notify_batch(docs)
+            notify_started_at = datetime.now().isoformat()
+            for doc in docs:
+                self.storage.record_document_event(doc, "notification_started", event_at=notify_started_at)
+            completion_times = self.notifier.notify_batch(docs)
+            for doc in docs:
+                completed_at = completion_times.get(doc.doc_id)
+                if completed_at:
+                    self.storage.record_document_event(doc, "notification_completed", event_at=completed_at)
             if not self.root.winfo_viewable():
                 self._flash_taskbar()
 
@@ -960,4 +976,6 @@ class EdinetMonitorGUI:
             threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
         self.monitor.start()
+        if hasattr(self, "screen_monitor") and self.screen_monitor:
+            self.screen_monitor.start()
         self.root.mainloop()

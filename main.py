@@ -12,6 +12,7 @@ from storage import Storage
 from classifier import Classifier
 from monitor import EdinetMonitor
 from notifier import Notifier
+from screen_monitor import EdinetScreenMonitor
 from gui import EdinetMonitorGUI
 
 
@@ -83,9 +84,15 @@ def main():
         on_new_docs=gui.enqueue_new_docs,
         on_status_change=gui.enqueue_status,
     )
+    screen_monitor = EdinetScreenMonitor(
+        config=config.get("screen_monitoring", {}),
+        storage=storage,
+        on_status_change=lambda status, message: logger.info("screen_monitor[%s] %s", status, message),
+    )
 
     # GUIにモニターを注入
     gui.monitor = monitor
+    gui.screen_monitor = screen_monitor
 
     # 起動
     logger.info("GUI起動")

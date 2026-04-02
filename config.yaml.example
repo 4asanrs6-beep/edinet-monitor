@@ -48,6 +48,29 @@ monitoring:
   # 訂正書類をスキップするか
   skip_corrections: true
 
+screen_monitoring:
+  # EDINET画面監視を使って screen_first_seen_at を記録する
+  enabled: true
+
+  # 画面監視の確認間隔(秒)
+  polling_interval_sec: 15
+
+  # Playwrightが利用するブラウザチャネル
+  browser_channel: "msedge"
+
+  # ログ上の監視ソース名
+  source_name: "edinet_screen_large_holding"
+
+  # EDINET簡易検索ページ
+  search_url: "https://disclosure2.edinet-fsa.go.jp/WEEK0010.aspx"
+
+  # 簡易検索で選ぶ書類区分
+  simple_search_categories:
+    securities_reports: false
+    large_holding: true
+    timely_reports: false
+    other: false
+
 notification:
   # デスクトップ通知の有効/無効
   enabled: true

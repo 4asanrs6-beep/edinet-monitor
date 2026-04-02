@@ -35,6 +35,19 @@ DEFAULT_CONFIG = {
         "watchlist_sec_codes": [],
         "skip_corrections": True,
     },
+    "screen_monitoring": {
+        "enabled": True,
+        "polling_interval_sec": 15,
+        "browser_channel": "msedge",
+        "source_name": "edinet_screen_large_holding",
+        "search_url": "https://disclosure2.edinet-fsa.go.jp/WEEK0010.aspx",
+        "simple_search_categories": {
+            "securities_reports": False,
+            "large_holding": True,
+            "timely_reports": False,
+            "other": False,
+        },
+    },
     "notification": {
         "enabled": True,
         "sound": True,

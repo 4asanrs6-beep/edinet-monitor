@@ -1,4 +1,4 @@
-"""EDINET Monitor - SQLiteストレージ."""
+"""EDINET Monitor - SQLite storage."""
 import sqlite3
 from datetime import datetime
 from typing import Optional
@@ -7,7 +7,7 @@ from models import Document
 
 
 class Storage:
-    """SQLiteによる開示書類の永続化."""
+    """SQLite-backed persistence for documents and monitoring telemetry."""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -21,10 +21,10 @@ class Storage:
         return conn
 
     def _init_db(self):
-        """テーブル作成."""
         conn = self._connect()
         try:
-            conn.executescript("""
+            conn.executescript(
+                """
                 CREATE TABLE IF NOT EXISTS documents (
                     doc_id TEXT PRIMARY KEY,
                     edinet_code TEXT,
@@ -82,35 +82,108 @@ class Storage:
 
                 CREATE INDEX IF NOT EXISTS idx_log_timestamp
                     ON monitor_log(timestamp DESC);
-            """)
+
+                CREATE TABLE IF NOT EXISTS document_latency (
+                    doc_id TEXT PRIMARY KEY,
+                    submit_datetime TEXT DEFAULT '',
+                    doc_type_code TEXT DEFAULT '',
+                    filer_name TEXT DEFAULT '',
+                    event_category TEXT DEFAULT '',
+                    api_first_seen_at TEXT,
+                    monitor_recognized_at TEXT,
+                    gui_queue_received_at TEXT,
+                    notification_started_at TEXT,
+                    notification_completed_at TEXT,
+                    screen_first_seen_at TEXT,
+                    screen_source TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    last_updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_document_latency_submit
+                    ON document_latency(submit_datetime DESC);
+                CREATE INDEX IF NOT EXISTS idx_document_latency_api_seen
+                    ON document_latency(api_first_seen_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_document_latency_category
+                    ON document_latency(event_category);
+
+                CREATE TABLE IF NOT EXISTS poll_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    poll_started_at TEXT NOT NULL,
+                    poll_completed_at TEXT,
+                    poll_target_date TEXT,
+                    request_started_at TEXT,
+                    response_received_at TEXT,
+                    http_status INTEGER,
+                    results_count INTEGER DEFAULT 0,
+                    new_docs_count INTEGER DEFAULT 0,
+                    duration_ms INTEGER DEFAULT 0,
+                    error_type TEXT DEFAULT '',
+                    error_message TEXT DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_poll_metrics_started
+                    ON poll_metrics(poll_started_at DESC);
+
+                CREATE TABLE IF NOT EXISTS screen_observations (
+                    screen_key TEXT PRIMARY KEY,
+                    submit_datetime TEXT DEFAULT '',
+                    doc_description TEXT DEFAULT '',
+                    edinet_code TEXT DEFAULT '',
+                    filer_name TEXT DEFAULT '',
+                    target_text TEXT DEFAULT '',
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    screen_source TEXT DEFAULT '',
+                    matched_doc_id TEXT DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_screen_observations_first_seen
+                    ON screen_observations(first_seen_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_screen_observations_matched_doc
+                    ON screen_observations(matched_doc_id);
+                """
+            )
             self._migrate_documents_schema(conn)
+            self._migrate_document_latency_schema(conn)
             conn.commit()
         finally:
             conn.close()
 
     def _migrate_documents_schema(self, conn: sqlite3.Connection):
-        """documents テーブルの後方互換マイグレーション."""
         cols = conn.execute("PRAGMA table_info(documents)").fetchall()
         col_names = {row["name"] for row in cols}
         if "tag" not in col_names:
             conn.execute("ALTER TABLE documents ADD COLUMN tag TEXT DEFAULT ''")
 
-    # ===== EDINETコードリスト =====
+    def _migrate_document_latency_schema(self, conn: sqlite3.Connection):
+        cols = conn.execute("PRAGMA table_info(document_latency)").fetchall()
+        col_names = {row["name"] for row in cols}
+        for name, ddl in [
+            ("screen_first_seen_at", "ALTER TABLE document_latency ADD COLUMN screen_first_seen_at TEXT"),
+            ("screen_source", "ALTER TABLE document_latency ADD COLUMN screen_source TEXT DEFAULT ''"),
+            ("notes", "ALTER TABLE document_latency ADD COLUMN notes TEXT DEFAULT ''"),
+        ]:
+            if name not in col_names:
+                conn.execute(ddl)
+
+    # ===== EDINET codes =====
 
     def save_edinet_codes(self, codes: list[tuple[str, str, Optional[str]]]):
-        """EDINETコードを一括保存. codes: [(edinet_code, company_name, sec_code), ...]"""
         if not codes:
             return
         now = datetime.now().isoformat()
         conn = self._connect()
         try:
             conn.executemany(
-                """INSERT INTO edinet_codes (edinet_code, company_name, sec_code, updated_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(edinet_code) DO UPDATE SET
-                       company_name = excluded.company_name,
-                       sec_code = COALESCE(excluded.sec_code, edinet_codes.sec_code),
-                       updated_at = excluded.updated_at""",
+                """
+                INSERT INTO edinet_codes (edinet_code, company_name, sec_code, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(edinet_code) DO UPDATE SET
+                    company_name = excluded.company_name,
+                    sec_code = COALESCE(excluded.sec_code, edinet_codes.sec_code),
+                    updated_at = excluded.updated_at
+                """,
                 [(code, name, sec, now) for code, name, sec in codes],
             )
             conn.commit()
@@ -118,7 +191,6 @@ class Storage:
             conn.close()
 
     def lookup_edinet_code(self, edinet_code: str) -> Optional[tuple[str, Optional[str]]]:
-        """EDINETコードから (会社名, 証券コード) を取得."""
         if not edinet_code:
             return None
         conn = self._connect()
@@ -134,7 +206,6 @@ class Storage:
             conn.close()
 
     def get_edinet_code_count(self) -> int:
-        """登録済みEDINETコード数."""
         conn = self._connect()
         try:
             row = conn.execute("SELECT COUNT(*) as cnt FROM edinet_codes").fetchone()
@@ -142,24 +213,21 @@ class Storage:
         finally:
             conn.close()
 
-    # ===== 書類操作 =====
+    # ===== document storage =====
 
     def doc_exists(self, doc_id: str) -> bool:
-        """docIDが既に存在するか確認."""
         conn = self._connect()
         try:
-            row = conn.execute(
-                "SELECT 1 FROM documents WHERE doc_id = ?", (doc_id,)
-            ).fetchone()
+            row = conn.execute("SELECT 1 FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
             return row is not None
         finally:
             conn.close()
 
     def save_document(self, doc: Document):
-        """書類を保存 (既存なら更新)."""
         conn = self._connect()
         try:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO documents (
                     doc_id, edinet_code, sec_code, filer_name,
                     doc_type_code, doc_description, submit_datetime,
@@ -183,23 +251,381 @@ class Storage:
                     subject_sec_code = excluded.subject_sec_code,
                     subsidiary_name = excluded.subsidiary_name,
                     withdrawal_status = excluded.withdrawal_status
-            """, (
-                doc.doc_id, doc.edinet_code, doc.sec_code, doc.filer_name,
-                doc.doc_type_code, doc.doc_description, doc.submit_datetime,
-                doc.ordinance_code, doc.form_code,
-                doc.issuer_edinet_code, doc.subject_edinet_code, doc.subsidiary_edinet_code,
-                doc.current_report_reason,
-                doc.issuer_name, doc.issuer_sec_code,
-                doc.subject_name, doc.subject_sec_code,
-                doc.subsidiary_name,
-                doc.event_category, doc.priority, doc.tag,
-                int(doc.is_read), doc.memo, doc.raw_json,
-                int(doc.xbrl_flag), int(doc.pdf_flag),
-                doc.withdrawal_status, doc.created_at,
-            ))
+                """,
+                (
+                    doc.doc_id,
+                    doc.edinet_code,
+                    doc.sec_code,
+                    doc.filer_name,
+                    doc.doc_type_code,
+                    doc.doc_description,
+                    doc.submit_datetime,
+                    doc.ordinance_code,
+                    doc.form_code,
+                    doc.issuer_edinet_code,
+                    doc.subject_edinet_code,
+                    doc.subsidiary_edinet_code,
+                    doc.current_report_reason,
+                    doc.issuer_name,
+                    doc.issuer_sec_code,
+                    doc.subject_name,
+                    doc.subject_sec_code,
+                    doc.subsidiary_name,
+                    doc.event_category,
+                    doc.priority,
+                    doc.tag,
+                    int(doc.is_read),
+                    doc.memo,
+                    doc.raw_json,
+                    int(doc.xbrl_flag),
+                    int(doc.pdf_flag),
+                    doc.withdrawal_status,
+                    doc.created_at,
+                ),
+            )
             conn.commit()
         finally:
             conn.close()
+
+    # ===== latency telemetry =====
+
+    def save_api_observations(self, docs: list[Document], observed_at: Optional[str] = None):
+        if not docs:
+            return
+        observed_at = observed_at or datetime.now().isoformat()
+        now = datetime.now().isoformat()
+        rows = [
+            (
+                doc.doc_id,
+                doc.submit_datetime,
+                doc.doc_type_code,
+                doc.filer_name,
+                doc.event_category,
+                observed_at,
+                now,
+            )
+            for doc in docs
+            if doc.doc_id
+        ]
+        if not rows:
+            return
+        conn = self._connect()
+        try:
+            conn.executemany(
+                """
+                INSERT INTO document_latency (
+                    doc_id, submit_datetime, doc_type_code, filer_name,
+                    event_category, api_first_seen_at, last_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id) DO UPDATE SET
+                    submit_datetime = CASE
+                        WHEN excluded.submit_datetime != '' THEN excluded.submit_datetime
+                        ELSE document_latency.submit_datetime
+                    END,
+                    doc_type_code = CASE
+                        WHEN excluded.doc_type_code != '' THEN excluded.doc_type_code
+                        ELSE document_latency.doc_type_code
+                    END,
+                    filer_name = CASE
+                        WHEN excluded.filer_name != '' THEN excluded.filer_name
+                        ELSE document_latency.filer_name
+                    END,
+                    event_category = CASE
+                        WHEN excluded.event_category != '' THEN excluded.event_category
+                        ELSE document_latency.event_category
+                    END,
+                    api_first_seen_at = COALESCE(document_latency.api_first_seen_at, excluded.api_first_seen_at),
+                    last_updated_at = excluded.last_updated_at
+                """,
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def record_document_event(
+        self,
+        doc: Document,
+        event_name: str,
+        event_at: Optional[str] = None,
+        screen_source: str = "",
+        notes: str = "",
+    ):
+        if not doc.doc_id:
+            return
+
+        column_map = {
+            "monitor_recognized": "monitor_recognized_at",
+            "gui_queue_received": "gui_queue_received_at",
+            "notification_started": "notification_started_at",
+            "notification_completed": "notification_completed_at",
+            "screen_first_seen": "screen_first_seen_at",
+        }
+        column = column_map.get(event_name)
+        if not column:
+            raise ValueError(f"unknown latency event: {event_name}")
+
+        event_at = event_at or datetime.now().isoformat()
+        now = datetime.now().isoformat()
+
+        conn = self._connect()
+        try:
+            conn.execute(
+                f"""
+                INSERT INTO document_latency (
+                    doc_id, submit_datetime, doc_type_code, filer_name, event_category,
+                    {column}, screen_source, notes, last_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id) DO UPDATE SET
+                    submit_datetime = CASE
+                        WHEN excluded.submit_datetime != '' THEN excluded.submit_datetime
+                        ELSE document_latency.submit_datetime
+                    END,
+                    doc_type_code = CASE
+                        WHEN excluded.doc_type_code != '' THEN excluded.doc_type_code
+                        ELSE document_latency.doc_type_code
+                    END,
+                    filer_name = CASE
+                        WHEN excluded.filer_name != '' THEN excluded.filer_name
+                        ELSE document_latency.filer_name
+                    END,
+                    event_category = CASE
+                        WHEN excluded.event_category != '' THEN excluded.event_category
+                        ELSE document_latency.event_category
+                    END,
+                    {column} = COALESCE(document_latency.{column}, excluded.{column}),
+                    screen_source = CASE
+                        WHEN excluded.screen_source != '' THEN excluded.screen_source
+                        ELSE document_latency.screen_source
+                    END,
+                    notes = CASE
+                        WHEN excluded.notes != '' THEN excluded.notes
+                        ELSE document_latency.notes
+                    END,
+                    last_updated_at = excluded.last_updated_at
+                """,
+                (
+                    doc.doc_id,
+                    doc.submit_datetime,
+                    doc.doc_type_code,
+                    doc.filer_name,
+                    doc.event_category,
+                    event_at,
+                    screen_source,
+                    notes,
+                    now,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def save_poll_metric(
+        self,
+        *,
+        poll_started_at: str,
+        poll_completed_at: Optional[str] = None,
+        poll_target_date: str = "",
+        request_started_at: Optional[str] = None,
+        response_received_at: Optional[str] = None,
+        http_status: Optional[int] = None,
+        results_count: int = 0,
+        new_docs_count: int = 0,
+        duration_ms: int = 0,
+        error_type: str = "",
+        error_message: str = "",
+    ):
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO poll_metrics (
+                    poll_started_at, poll_completed_at, poll_target_date,
+                    request_started_at, response_received_at, http_status,
+                    results_count, new_docs_count, duration_ms,
+                    error_type, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    poll_started_at,
+                    poll_completed_at,
+                    poll_target_date,
+                    request_started_at,
+                    response_received_at,
+                    http_status,
+                    results_count,
+                    new_docs_count,
+                    duration_ms,
+                    error_type,
+                    error_message,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def save_screen_observations(self, observations: list[dict], observed_at: Optional[str] = None):
+        if not observations:
+            return
+        observed_at = observed_at or datetime.now().isoformat()
+        rows = []
+        for obs in observations:
+            rows.append(
+                (
+                    obs["screen_key"],
+                    obs.get("submit_datetime", ""),
+                    obs.get("doc_description", ""),
+                    obs.get("edinet_code", ""),
+                    obs.get("filer_name", ""),
+                    obs.get("target_text", ""),
+                    observed_at,
+                    observed_at,
+                    obs.get("screen_source", ""),
+                )
+            )
+        conn = self._connect()
+        try:
+            conn.executemany(
+                """
+                INSERT INTO screen_observations (
+                    screen_key, submit_datetime, doc_description, edinet_code,
+                    filer_name, target_text, first_seen_at, last_seen_at, screen_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(screen_key) DO UPDATE SET
+                    submit_datetime = CASE
+                        WHEN excluded.submit_datetime != '' THEN excluded.submit_datetime
+                        ELSE screen_observations.submit_datetime
+                    END,
+                    doc_description = CASE
+                        WHEN excluded.doc_description != '' THEN excluded.doc_description
+                        ELSE screen_observations.doc_description
+                    END,
+                    edinet_code = CASE
+                        WHEN excluded.edinet_code != '' THEN excluded.edinet_code
+                        ELSE screen_observations.edinet_code
+                    END,
+                    filer_name = CASE
+                        WHEN excluded.filer_name != '' THEN excluded.filer_name
+                        ELSE screen_observations.filer_name
+                    END,
+                    target_text = CASE
+                        WHEN excluded.target_text != '' THEN excluded.target_text
+                        ELSE screen_observations.target_text
+                    END,
+                    last_seen_at = excluded.last_seen_at,
+                    screen_source = CASE
+                        WHEN excluded.screen_source != '' THEN excluded.screen_source
+                        ELSE screen_observations.screen_source
+                    END
+                """,
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def reconcile_screen_observations(self, docs: list[Document]) -> int:
+        matched = 0
+        matched_events: list[tuple[Document, str, str]] = []
+        conn = self._connect()
+        try:
+            for doc in docs:
+                if not doc.doc_id:
+                    continue
+                screen_row = conn.execute(
+                    """
+                    SELECT screen_key, first_seen_at, screen_source
+                    FROM screen_observations
+                    WHERE matched_doc_id = ''
+                      AND submit_datetime = ?
+                      AND doc_description = ?
+                      AND edinet_code = ?
+                      AND filer_name = ?
+                    ORDER BY first_seen_at ASC
+                    LIMIT 1
+                    """,
+                    (
+                        self._normalize_submit_minute(doc.submit_datetime),
+                        doc.doc_description,
+                        doc.edinet_code,
+                        doc.filer_name,
+                    ),
+                ).fetchone()
+                if not screen_row:
+                    continue
+                conn.execute(
+                    "UPDATE screen_observations SET matched_doc_id = ? WHERE screen_key = ?",
+                    (doc.doc_id, screen_row["screen_key"]),
+                )
+                matched_events.append(
+                    (
+                        doc,
+                        screen_row["first_seen_at"],
+                        screen_row["screen_source"] or "edinet_screen",
+                    )
+                )
+                matched += 1
+            conn.commit()
+        finally:
+            conn.close()
+        for doc, first_seen_at, screen_source in matched_events:
+            self.record_document_event(
+                doc,
+                "screen_first_seen",
+                event_at=first_seen_at,
+                screen_source=screen_source,
+            )
+        return matched
+
+    def get_recent_latency_records(self, limit: int = 100) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM document_latency
+                ORDER BY COALESCE(notification_completed_at, monitor_recognized_at, api_first_seen_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_recent_poll_metrics(self, limit: int = 200) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM poll_metrics
+                ORDER BY poll_started_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_recent_screen_observations(self, limit: int = 200) -> list[dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM screen_observations
+                ORDER BY first_seen_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    # ===== read APIs =====
 
     def get_documents(
         self,
@@ -211,11 +637,6 @@ class Storage:
         sort_by: str = "time",
         limit: int = 500,
     ) -> list[Document]:
-        """書類を検索.
-
-        Args:
-            sort_by: "time" (時刻降順) or "priority" (優先度昇順→時刻降順)
-        """
         conditions = []
         params = []
 
@@ -229,9 +650,7 @@ class Storage:
             conditions.append("is_read = ?")
             params.append(int(is_read))
         if sec_code:
-            conditions.append(
-                "(sec_code LIKE ? OR issuer_sec_code LIKE ? OR subject_sec_code LIKE ?)"
-            )
+            conditions.append("(sec_code LIKE ? OR issuer_sec_code LIKE ? OR subject_sec_code LIKE ?)")
             params.extend([f"{sec_code}%", f"{sec_code}%", f"{sec_code}%"])
         if search_text:
             conditions.append(
@@ -242,10 +661,7 @@ class Storage:
             params.extend([pattern, pattern, pattern, pattern, pattern])
 
         where = " AND ".join(conditions) if conditions else "1=1"
-        if sort_by == "priority":
-            order = "priority ASC, submit_datetime DESC"
-        else:
-            order = "submit_datetime DESC"
+        order = "priority ASC, submit_datetime DESC" if sort_by == "priority" else "submit_datetime DESC"
         query = f"""
             SELECT * FROM documents
             WHERE {where}
@@ -262,31 +678,22 @@ class Storage:
             conn.close()
 
     def update_read_status(self, doc_id: str, is_read: bool):
-        """既読/未読を更新."""
         conn = self._connect()
         try:
-            conn.execute(
-                "UPDATE documents SET is_read = ? WHERE doc_id = ?",
-                (int(is_read), doc_id),
-            )
+            conn.execute("UPDATE documents SET is_read = ? WHERE doc_id = ?", (int(is_read), doc_id))
             conn.commit()
         finally:
             conn.close()
 
     def update_memo(self, doc_id: str, memo: str):
-        """メモを更新."""
         conn = self._connect()
         try:
-            conn.execute(
-                "UPDATE documents SET memo = ? WHERE doc_id = ?",
-                (memo, doc_id),
-            )
+            conn.execute("UPDATE documents SET memo = ? WHERE doc_id = ?", (memo, doc_id))
             conn.commit()
         finally:
             conn.close()
 
     def mark_all_read(self):
-        """全書類を既読にする."""
         conn = self._connect()
         try:
             conn.execute("UPDATE documents SET is_read = 1 WHERE is_read = 0")
@@ -295,18 +702,14 @@ class Storage:
             conn.close()
 
     def get_unread_count(self) -> int:
-        """未読件数を取得."""
         conn = self._connect()
         try:
-            row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM documents WHERE is_read = 0"
-            ).fetchone()
+            row = conn.execute("SELECT COUNT(*) as cnt FROM documents WHERE is_read = 0").fetchone()
             return row["cnt"] if row else 0
         finally:
             conn.close()
 
     def save_log(self, status: str, message: str, docs_found: int = 0):
-        """監視ログを保存."""
         conn = self._connect()
         try:
             conn.execute(
@@ -318,7 +721,6 @@ class Storage:
             conn.close()
 
     def get_logs(self, limit: int = 100) -> list[dict]:
-        """監視ログを取得."""
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -330,7 +732,6 @@ class Storage:
             conn.close()
 
     def _row_to_doc(self, row: sqlite3.Row) -> Document:
-        """DBの行をDocumentに変換."""
         return Document(
             doc_id=row["doc_id"],
             edinet_code=row["edinet_code"] or "",
@@ -361,3 +762,12 @@ class Storage:
             withdrawal_status=row["withdrawal_status"] or "0",
             created_at=row["created_at"] or "",
         )
+
+    @staticmethod
+    def _normalize_submit_minute(value: str) -> str:
+        if not value:
+            return ""
+        normalized = value.replace("/", "-").strip()
+        if len(normalized) >= 16:
+            return normalized[:16]
+        return normalized
