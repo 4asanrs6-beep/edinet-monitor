@@ -55,6 +55,10 @@ notification:
   # 通知音
   sound: true
 
+  # 通知対象の最大優先度 (1=最重要, 2=重要, 3=中, 4=低)
+  # 例: 2 なら「最重要」「重要」のみ通知
+  max_priority_to_notify: 2
+
 logging:
   level: "INFO"
 
