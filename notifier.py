@@ -22,13 +22,16 @@ class Notifier:
 
     APP_ID = "EDINET Monitor"
 
-    def __init__(self, enabled: bool = True, sound: bool = True):
+    def __init__(self, enabled: bool = True, sound: bool = True, max_priority_to_notify: int = 2):
         self.enabled = enabled
         self.sound = sound
+        self.max_priority_to_notify = max_priority_to_notify
 
     def notify(self, doc: Document):
         """書類の新着通知を送信."""
         if not self.enabled:
+            return
+        if doc.priority > self.max_priority_to_notify:
             return
 
         title = self._build_title(doc)
@@ -45,6 +48,9 @@ class Notifier:
         3件以下なら個別通知、4件以上ならサマリー通知。
         """
         if not self.enabled or not docs:
+            return
+        docs = [d for d in docs if d.priority <= self.max_priority_to_notify]
+        if not docs:
             return
 
         if len(docs) <= 3:
