@@ -57,6 +57,9 @@ python main.py
 | `monitoring.skip_corrections` | 訂正書類をスキップ | true |
 | `notification.enabled` | デスクトップ通知 | true |
 | `notification.sound` | 通知音 | true |
+| `notification.max_priority_to_notify` | 通知対象の最大優先度（1=最重要,2=重要...） | 2 |
+
+※ `notification.max_priority_to_notify` は `1`〜`4` を指定（小さいほど重要）します。
 
 ### ウォッチリスト設定例
 

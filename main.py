@@ -67,6 +67,7 @@ def main():
     notifier = Notifier(
         enabled=notif_cfg.get("enabled", True),
         sound=notif_cfg.get("sound", True),
+        max_priority_to_notify=notif_cfg.get("max_priority_to_notify", 2),
     )
 
     # GUI (モニター依存のコールバックはGUIから注入)
