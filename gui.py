@@ -14,19 +14,18 @@ import json
 import logging
 import os
 import queue
-import subprocess
 import sys
 import threading
 import tkinter as tk
 import webbrowser
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from typing import Optional
 
 from config import PDF_CACHE_DIR
-from models import Document, EventCategory, Priority, PRIORITY_LABELS
+from models import Document, EventCategory, Priority
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +56,7 @@ class EdinetMonitorGUI:
         self.view_date = date.today()
         self.search_text = ""
         self._doc_cache: dict[str, Document] = {}
+        self._current_xbrl_data: Optional[dict] = None
 
         self._setup_root()
         self._setup_styles()
@@ -266,11 +266,17 @@ class EdinetMonitorGUI:
 
         self.detail_labels = {}
         multiline_heights = {
+            "submit_time": 2,
             "filer": 2,
+            "filer_ticker": 2,
             "issuer": 2,
             "subject": 2,
             "subsidiary": 2,
             "description": 3,
+            "category": 2,
+            "priority": 2,
+            "edinet_code": 2,
+            "ordinance_form": 2,
         }
         for i, (label_text, key) in enumerate(fields, start=2):
             ttk.Label(f, text=label_text, font=(self.jp_font, 10, "bold")).grid(
@@ -329,6 +335,25 @@ class EdinetMonitorGUI:
         self.btn_raw = ttk.Button(btn_frame, text="生データ", command=self._show_raw_json, state=tk.DISABLED)
         self.btn_raw.pack(side=tk.LEFT, padx=(0, 4))
 
+        row += 1
+
+        ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=8)
+        row += 1
+
+        ttk.Label(f, text="コピー用（詳細+重要情報）:", font=(self.jp_font, 10, "bold")).grid(
+            row=row, column=0, columnspan=2, padx=8, pady=(2, 2), sticky=tk.W
+        )
+        row += 1
+
+        self.copy_blob_text = tk.Text(
+            f,
+            height=8,
+            width=64,
+            wrap=tk.WORD,
+            font=(self.jp_font, 10),
+        )
+        self.copy_blob_text.grid(row=row, column=0, columnspan=2, padx=8, pady=(0, 4), sticky=tk.EW)
+        self.copy_blob_text.configure(state=tk.DISABLED)
         row += 1
 
         ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=8)
@@ -481,6 +506,47 @@ class EdinetMonitorGUI:
         self.detail_reason.delete("1.0", tk.END)
         self.detail_reason.insert("1.0", value or "")
         self.detail_reason.configure(state=tk.DISABLED)
+
+    def _get_detail_value(self, key: str, fallback: str = "-") -> str:
+        value = self.detail_labels[key].get("1.0", tk.END).strip()
+        return value or fallback
+
+    def _get_reason_value(self, fallback: str = "-") -> str:
+        value = self.detail_reason.get("1.0", tk.END).strip()
+        return value or fallback
+
+    def _refresh_copy_blob(self):
+        """詳細＋重要情報をまとめたコピー用テキストを更新."""
+        if not self.selected_doc:
+            text = ""
+        else:
+            lines = [
+                f"提出時刻: {self._get_detail_value('submit_time')}",
+                f"提出者: {self._get_detail_value('filer')}",
+                f"提出者コード: {self._get_detail_value('filer_ticker')}",
+                f"発行会社: {self._get_detail_value('issuer')}",
+                f"対象会社: {self._get_detail_value('subject')}",
+                f"子会社: {self._get_detail_value('subsidiary')}",
+                f"書類名: {self._get_detail_value('description')}",
+                f"イベント分類: {self._get_detail_value('category')}",
+                f"優先度: {self._get_detail_value('priority')}",
+                f"EDINETコード: {self._get_detail_value('edinet_code')}",
+                f"府令/様式: {self._get_detail_value('ordinance_form')}",
+                f"提出理由: {self._get_reason_value()}",
+                "",
+                "重要情報:",
+            ]
+            if self._current_xbrl_data:
+                for key, value in self._current_xbrl_data.items():
+                    lines.append(f"  {key}: {value}")
+            else:
+                lines.append("  -")
+            text = "\n".join(lines)
+
+        self.copy_blob_text.configure(state=tk.NORMAL)
+        self.copy_blob_text.delete("1.0", tk.END)
+        self.copy_blob_text.insert("1.0", text)
+        self.copy_blob_text.configure(state=tk.DISABLED)
 
     def _on_filter_change(self):
         self.filter_category = self.category_var.get()
@@ -644,6 +710,8 @@ class EdinetMonitorGUI:
         self._set_detail_text("priority", p_label, fg=p_color)
 
         self._set_reason_text(doc.current_report_reason or "-")
+        self._current_xbrl_data = None
+        self._refresh_copy_blob()
 
         self.memo_text.delete("1.0", tk.END)
         if doc.memo:
@@ -683,6 +751,8 @@ class EdinetMonitorGUI:
             widget.destroy()
         if message:
             ttk.Label(self.xbrl_frame, text=message, foreground="#888").pack(anchor=tk.W)
+        self._current_xbrl_data = None
+        self._refresh_copy_blob()
 
     def _show_xbrl_info(self, data: dict):
         """XBRL抽出結果を表示."""
@@ -691,6 +761,8 @@ class EdinetMonitorGUI:
 
         if not data:
             ttk.Label(self.xbrl_frame, text="抽出データなし", foreground="#888").pack(anchor=tk.W)
+            self._current_xbrl_data = None
+            self._refresh_copy_blob()
             return
 
         for key, value in data.items():
@@ -712,6 +784,8 @@ class EdinetMonitorGUI:
 
             val = ttk.Label(row_frame, text=value, foreground=fg, wraplength=350)
             val.pack(side=tk.LEFT)
+        self._current_xbrl_data = data
+        self._refresh_copy_blob()
 
     def _update_read_button(self):
         if self.selected_doc:
