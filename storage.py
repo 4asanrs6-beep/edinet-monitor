@@ -1,9 +1,12 @@
 """EDINET Monitor - SQLite storage."""
+import logging
 import sqlite3
 from datetime import datetime
 from typing import Optional
 
 from models import Document
+
+logger = logging.getLogger(__name__)
 
 
 class Storage:
@@ -155,6 +158,8 @@ class Storage:
         col_names = {row["name"] for row in cols}
         if "tag" not in col_names:
             conn.execute("ALTER TABLE documents ADD COLUMN tag TEXT DEFAULT ''")
+        if "is_starred" not in col_names:
+            conn.execute("ALTER TABLE documents ADD COLUMN is_starred INTEGER NOT NULL DEFAULT 0")
 
     def _migrate_document_latency_schema(self, conn: sqlite3.Connection):
         cols = conn.execute("PRAGMA table_info(document_latency)").fetchall()
@@ -201,6 +206,39 @@ class Storage:
             ).fetchone()
             if row:
                 return (row["company_name"], row["sec_code"])
+            return None
+        finally:
+            conn.close()
+
+    def lookup_by_company_name(self, company_name: str) -> Optional[tuple[str, Optional[str]]]:
+        """会社名からedinet_code, sec_codeを逆引き. 完全一致→前方一致→部分一致の順で検索."""
+        if not company_name:
+            return None
+        # 全角半角・スペース揺れを吸収するため正規化
+        name = company_name.strip()
+        conn = self._connect()
+        try:
+            # 1. 完全一致
+            row = conn.execute(
+                "SELECT edinet_code, sec_code FROM edinet_codes WHERE company_name = ? LIMIT 1",
+                (name,),
+            ).fetchone()
+            if row:
+                return (row["edinet_code"], row["sec_code"])
+            # 2. 前方一致（「株式会社○○」→「株式会社○○ホールディングス」等に対応）
+            row = conn.execute(
+                "SELECT edinet_code, sec_code FROM edinet_codes WHERE company_name LIKE ? LIMIT 1",
+                (f"{name}%",),
+            ).fetchone()
+            if row:
+                return (row["edinet_code"], row["sec_code"])
+            # 3. 部分一致（最終手段）
+            row = conn.execute(
+                "SELECT edinet_code, sec_code FROM edinet_codes WHERE company_name LIKE ? LIMIT 1",
+                (f"%{name}%",),
+            ).fetchone()
+            if row:
+                return (row["edinet_code"], row["sec_code"])
             return None
         finally:
             conn.close()
@@ -289,59 +327,72 @@ class Storage:
 
     # ===== latency telemetry =====
 
-    def save_api_observations(self, docs: list[Document], observed_at: Optional[str] = None):
+    def save_api_observations(self, docs: list[Document], observed_at: Optional[str] = None) -> list[Document]:
+        """Save API observations and return list of newly detected docs."""
         if not docs:
-            return
+            return []
         observed_at = observed_at or datetime.now().isoformat()
         now = datetime.now().isoformat()
-        rows = [
-            (
-                doc.doc_id,
-                doc.submit_datetime,
-                doc.doc_type_code,
-                doc.filer_name,
-                doc.event_category,
-                observed_at,
-                now,
-            )
-            for doc in docs
-            if doc.doc_id
-        ]
-        if not rows:
-            return
+
         conn = self._connect()
+        new_docs: list[Document] = []
         try:
-            conn.executemany(
-                """
-                INSERT INTO document_latency (
-                    doc_id, submit_datetime, doc_type_code, filer_name,
-                    event_category, api_first_seen_at, last_updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(doc_id) DO UPDATE SET
-                    submit_datetime = CASE
-                        WHEN excluded.submit_datetime != '' THEN excluded.submit_datetime
-                        ELSE document_latency.submit_datetime
-                    END,
-                    doc_type_code = CASE
-                        WHEN excluded.doc_type_code != '' THEN excluded.doc_type_code
-                        ELSE document_latency.doc_type_code
-                    END,
-                    filer_name = CASE
-                        WHEN excluded.filer_name != '' THEN excluded.filer_name
-                        ELSE document_latency.filer_name
-                    END,
-                    event_category = CASE
-                        WHEN excluded.event_category != '' THEN excluded.event_category
-                        ELSE document_latency.event_category
-                    END,
-                    api_first_seen_at = COALESCE(document_latency.api_first_seen_at, excluded.api_first_seen_at),
-                    last_updated_at = excluded.last_updated_at
-                """,
-                rows,
-            )
+            for doc in docs:
+                if not doc.doc_id:
+                    continue
+                row = conn.execute(
+                    "SELECT api_first_seen_at FROM document_latency WHERE doc_id = ?",
+                    (doc.doc_id,),
+                ).fetchone()
+                if not row or not row["api_first_seen_at"]:
+                    new_docs.append(doc)
+
+            rows = [
+                (
+                    doc.doc_id,
+                    doc.submit_datetime,
+                    doc.doc_type_code,
+                    doc.filer_name,
+                    doc.event_category,
+                    observed_at,
+                    now,
+                )
+                for doc in docs
+                if doc.doc_id
+            ]
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO document_latency (
+                        doc_id, submit_datetime, doc_type_code, filer_name,
+                        event_category, api_first_seen_at, last_updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(doc_id) DO UPDATE SET
+                        submit_datetime = CASE
+                            WHEN excluded.submit_datetime != '' THEN excluded.submit_datetime
+                            ELSE document_latency.submit_datetime
+                        END,
+                        doc_type_code = CASE
+                            WHEN excluded.doc_type_code != '' THEN excluded.doc_type_code
+                            ELSE document_latency.doc_type_code
+                        END,
+                        filer_name = CASE
+                            WHEN excluded.filer_name != '' THEN excluded.filer_name
+                            ELSE document_latency.filer_name
+                        END,
+                        event_category = CASE
+                            WHEN excluded.event_category != '' THEN excluded.event_category
+                            ELSE document_latency.event_category
+                        END,
+                        api_first_seen_at = COALESCE(document_latency.api_first_seen_at, excluded.api_first_seen_at),
+                        last_updated_at = excluded.last_updated_at
+                    """,
+                    rows,
+                )
             conn.commit()
         finally:
             conn.close()
+        return new_docs
 
     def record_document_event(
         self,
@@ -464,27 +515,41 @@ class Storage:
         finally:
             conn.close()
 
-    def save_screen_observations(self, observations: list[dict], observed_at: Optional[str] = None):
+    def save_screen_observations(self, observations: list[dict], observed_at: Optional[str] = None) -> list[dict]:
+        """Save screen observations and return list of newly detected ones."""
         if not observations:
-            return
+            return []
         observed_at = observed_at or datetime.now().isoformat()
-        rows = []
-        for obs in observations:
-            rows.append(
-                (
-                    obs["screen_key"],
-                    obs.get("submit_datetime", ""),
-                    obs.get("doc_description", ""),
-                    obs.get("edinet_code", ""),
-                    obs.get("filer_name", ""),
-                    obs.get("target_text", ""),
-                    observed_at,
-                    observed_at,
-                    obs.get("screen_source", ""),
-                )
-            )
         conn = self._connect()
+        new_observations: list[dict] = []
         try:
+            existing_keys = set()
+            for obs in observations:
+                row = conn.execute(
+                    "SELECT 1 FROM screen_observations WHERE screen_key = ?",
+                    (obs["screen_key"],),
+                ).fetchone()
+                if row:
+                    existing_keys.add(obs["screen_key"])
+
+            rows = []
+            for obs in observations:
+                rows.append(
+                    (
+                        obs["screen_key"],
+                        obs.get("submit_datetime", ""),
+                        obs.get("doc_description", ""),
+                        obs.get("edinet_code", ""),
+                        obs.get("filer_name", ""),
+                        obs.get("target_text", ""),
+                        observed_at,
+                        observed_at,
+                        obs.get("screen_source", ""),
+                    )
+                )
+                if obs["screen_key"] not in existing_keys:
+                    new_observations.append(obs)
+
             conn.executemany(
                 """
                 INSERT INTO screen_observations (
@@ -523,6 +588,7 @@ class Storage:
             conn.commit()
         finally:
             conn.close()
+        return new_observations
 
     def reconcile_screen_observations(self, docs: list[Document]) -> int:
         matched = 0
@@ -575,7 +641,59 @@ class Storage:
                 event_at=first_seen_at,
                 screen_source=screen_source,
             )
+            self._log_latency_comparison(doc.doc_id)
         return matched
+
+    def _log_latency_comparison(self, doc_id: str):
+        """Log the screen vs API latency for a reconciled document."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT doc_id, filer_name, doc_type_code, submit_datetime,
+                       api_first_seen_at, screen_first_seen_at
+                FROM document_latency
+                WHERE doc_id = ?
+                """,
+                (doc_id,),
+            ).fetchone()
+            if not row:
+                return
+            api_at = row["api_first_seen_at"]
+            screen_at = row["screen_first_seen_at"]
+            filer = row["filer_name"] or ""
+            submit = row["submit_datetime"] or ""
+            if api_at and screen_at:
+                try:
+                    api_dt = datetime.fromisoformat(api_at)
+                    screen_dt = datetime.fromisoformat(screen_at)
+                    diff_sec = (api_dt - screen_dt).total_seconds()
+                    if diff_sec > 0:
+                        leader = "screen"
+                        lead_sec = diff_sec
+                    else:
+                        leader = "api"
+                        lead_sec = -diff_sec
+                    logger.info(
+                        "latency: doc=%s filer=%s submit=%s screen=%s api=%s | %s led by %.1fs",
+                        doc_id, filer, submit,
+                        screen_at, api_at,
+                        leader, lead_sec,
+                    )
+                except (ValueError, TypeError):
+                    pass
+            elif screen_at and not api_at:
+                logger.info(
+                    "latency: doc=%s filer=%s submit=%s | screen detected at %s, API not yet seen",
+                    doc_id, filer, submit, screen_at,
+                )
+            elif api_at and not screen_at:
+                logger.info(
+                    "latency: doc=%s filer=%s submit=%s | API detected at %s, screen not yet seen",
+                    doc_id, filer, submit, api_at,
+                )
+        finally:
+            conn.close()
 
     def get_recent_latency_records(self, limit: int = 100) -> list[dict]:
         conn = self._connect()
@@ -685,6 +803,25 @@ class Storage:
         finally:
             conn.close()
 
+    def update_starred(self, doc_id: str, is_starred: bool):
+        conn = self._connect()
+        try:
+            conn.execute("UPDATE documents SET is_starred = ? WHERE doc_id = ?", (int(is_starred), doc_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_starred_documents(self, limit: int = 500) -> list[Document]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM documents WHERE is_starred = 1 ORDER BY submit_datetime DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._row_to_doc(row) for row in rows]
+        finally:
+            conn.close()
+
     def update_memo(self, doc_id: str, memo: str):
         conn = self._connect()
         try:
@@ -755,6 +892,7 @@ class Storage:
             priority=row["priority"],
             tag=row["tag"] if "tag" in row.keys() else "",
             is_read=bool(row["is_read"]),
+            is_starred=bool(row["is_starred"]) if "is_starred" in row.keys() else False,
             memo=row["memo"] or "",
             raw_json=row["raw_json"] or "",
             xbrl_flag=bool(row["xbrl_flag"]),

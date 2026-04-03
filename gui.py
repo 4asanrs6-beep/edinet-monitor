@@ -24,6 +24,7 @@ from tkinter import font as tkfont
 from tkinter import messagebox, ttk
 from typing import Optional
 
+from classifier import Classifier
 from config import PDF_CACHE_DIR
 from models import Document, EventCategory, Priority
 
@@ -57,6 +58,8 @@ class EdinetMonitorGUI:
         self.search_text = ""
         self._doc_cache: dict[str, Document] = {}
         self._current_xbrl_data: Optional[dict] = None
+        self._screen_notified: set[str] = set()  # 速報通知済みのscreen_iid
+        self._screen_docs: dict[str, Document] = {}  # 速報行のDocument（API未検出分を保持）
 
         self._setup_root()
         self._setup_styles()
@@ -110,11 +113,11 @@ class EdinetMonitorGUI:
         paned.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
         left_frame = ttk.Frame(paned)
-        paned.add(left_frame, weight=2)
+        paned.add(left_frame, weight=4)
         self._create_event_list(left_frame)
 
         right_frame = ttk.Frame(paned)
-        paned.add(right_frame, weight=3)
+        paned.add(right_frame, weight=1)
         self._create_detail_view(right_frame)
 
         self._create_status_bar(main_frame)
@@ -163,6 +166,12 @@ class EdinetMonitorGUI:
             side=tk.LEFT, padx=(8, 4)
         )
 
+        self.star_filter_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            toolbar, text="★のみ", variable=self.star_filter_var,
+            command=self._on_filter_change
+        ).pack(side=tk.LEFT, padx=(8, 2))
+
         # ソート切替
         self.sort_var = tk.StringVar(value="time")
         ttk.Label(toolbar, text="並び:").pack(side=tk.LEFT, padx=(8, 2))
@@ -185,20 +194,24 @@ class EdinetMonitorGUI:
         ).pack(side=tk.RIGHT, padx=2)
 
     def _create_event_list(self, parent):
-        columns = ("time", "category", "pri", "target", "filer", "description")
+        columns = ("star", "time", "category", "pri", "ticker", "target", "filer", "description")
         self.tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
 
+        self.tree.heading("star", text="★", anchor=tk.CENTER)
         self.tree.heading("time", text="時刻", anchor=tk.W)
         self.tree.heading("category", text="種別", anchor=tk.W)
         self.tree.heading("pri", text="優先", anchor=tk.CENTER)
+        self.tree.heading("ticker", text="コード", anchor=tk.CENTER)
         self.tree.heading("target", text="対象", anchor=tk.W)
         self.tree.heading("filer", text="提出者", anchor=tk.W)
         self.tree.heading("description", text="書類名", anchor=tk.W)
 
+        self.tree.column("star", width=30, minwidth=25, stretch=False, anchor=tk.CENTER)
         self.tree.column("time", width=50, minwidth=45, stretch=False)
         self.tree.column("category", width=100, minwidth=70, stretch=False)
         self.tree.column("pri", width=40, minwidth=35, stretch=False, anchor=tk.CENTER)
-        self.tree.column("target", width=180, minwidth=100)
+        self.tree.column("ticker", width=50, minwidth=40, stretch=False, anchor=tk.CENTER)
+        self.tree.column("target", width=160, minwidth=100)
         self.tree.column("filer", width=150, minwidth=100)
         self.tree.column("description", width=130, minwidth=80)
 
@@ -209,6 +222,8 @@ class EdinetMonitorGUI:
         self.tree.tag_configure("p2", foreground="#E65100", background="#FFF8E1")
         self.tree.tag_configure("p3", foreground="#1565C0", background="#F5F5F5")
         self.tree.tag_configure("p4", foreground="#9E9E9E", background="#FAFAFA")
+        # 速報行: 黄色背景で目立たせる
+        self.tree.tag_configure("screen_flash", background="#FFEB3B", font=(self.jp_font, 10, "bold"))
 
         scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -243,83 +258,17 @@ class EdinetMonitorGUI:
 
     def _build_detail_content(self):
         f = self.detail_frame
-        pad = {"padx": 8, "pady": 2, "sticky": tk.W}
+        row = 0
 
+        # ヘッダー
         self.detail_header = ttk.Label(f, text="書類を選択してください", style="Header.TLabel")
-        self.detail_header.grid(row=0, column=0, columnspan=2, padx=8, pady=(8, 4), sticky=tk.W)
-
-        ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=1, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=4)
-
-        fields = [
-            ("提出時刻:", "submit_time"),
-            ("提出者:", "filer"),
-            ("提出者コード:", "filer_ticker"),
-            ("発行会社:", "issuer"),
-            ("対象会社:", "subject"),
-            ("子会社:", "subsidiary"),
-            ("書類名:", "description"),
-            ("イベント分類:", "category"),
-            ("優先度:", "priority"),
-            ("EDINET コード:", "edinet_code"),
-            ("府令/様式:", "ordinance_form"),
-        ]
-
-        self.detail_labels = {}
-        multiline_heights = {
-            "submit_time": 2,
-            "filer": 2,
-            "filer_ticker": 2,
-            "issuer": 2,
-            "subject": 2,
-            "subsidiary": 2,
-            "description": 3,
-            "category": 2,
-            "priority": 2,
-            "edinet_code": 2,
-            "ordinance_form": 2,
-        }
-        for i, (label_text, key) in enumerate(fields, start=2):
-            ttk.Label(f, text=label_text, font=(self.jp_font, 10, "bold")).grid(
-                row=i, column=0, padx=(8, 4), pady=2, sticky=tk.NE
-            )
-            txt = tk.Text(
-                f,
-                height=multiline_heights.get(key, 1),
-                width=52,
-                wrap=tk.WORD,
-                font=(self.jp_font, 10),
-                relief=tk.FLAT,
-                highlightthickness=0,
-                borderwidth=0,
-            )
-            txt.grid(row=i, column=1, **pad)
-            txt.configure(state=tk.DISABLED)
-            self.detail_labels[key] = txt
-
-        row = len(fields) + 2
-
-        # 提出理由
-        ttk.Label(f, text="提出理由:", font=(self.jp_font, 10, "bold")).grid(
-            row=row, column=0, padx=(8, 4), pady=2, sticky=tk.NE
-        )
-        self.detail_reason = tk.Text(
-            f,
-            height=3,
-            width=52,
-            wrap=tk.WORD,
-            font=(self.jp_font, 10),
-            relief=tk.FLAT,
-            highlightthickness=0,
-            borderwidth=0,
-        )
-        self.detail_reason.grid(row=row, column=1, **pad)
-        self.detail_reason.configure(state=tk.DISABLED)
+        self.detail_header.grid(row=row, column=0, columnspan=2, padx=8, pady=(8, 4), sticky=tk.W)
         row += 1
 
-        ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=8)
+        ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=4)
         row += 1
 
-        # アクションボタン
+        # アクションボタン（最上部に配置）
         btn_frame = ttk.Frame(f)
         btn_frame.grid(row=row, column=0, columnspan=2, padx=8, pady=4, sticky=tk.W)
 
@@ -332,14 +281,32 @@ class EdinetMonitorGUI:
         self.btn_toggle_read = ttk.Button(btn_frame, text="既読にする", command=self._toggle_read, state=tk.DISABLED)
         self.btn_toggle_read.pack(side=tk.LEFT, padx=(0, 4))
 
+        self.btn_star = ttk.Button(btn_frame, text="★ お気に入り", command=self._toggle_star, state=tk.DISABLED)
+        self.btn_star.pack(side=tk.LEFT, padx=(0, 4))
+
         self.btn_raw = ttk.Button(btn_frame, text="生データ", command=self._show_raw_json, state=tk.DISABLED)
         self.btn_raw.pack(side=tk.LEFT, padx=(0, 4))
-
         row += 1
 
         ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=8)
         row += 1
 
+        # 重要情報（XBRL）
+        ttk.Label(f, text="重要情報:", font=(self.jp_font, 11, "bold")).grid(
+            row=row, column=0, columnspan=2, padx=8, pady=(4, 2), sticky=tk.W
+        )
+        row += 1
+
+        self.xbrl_frame = ttk.Frame(f)
+        self.xbrl_frame.grid(row=row, column=0, columnspan=2, padx=8, pady=2, sticky=tk.EW)
+        self.xbrl_info_label = ttk.Label(self.xbrl_frame, text="書類を選択すると自動抽出します", foreground="#888")
+        self.xbrl_info_label.pack(anchor=tk.W)
+        row += 1
+
+        ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=8)
+        row += 1
+
+        # コピー用
         ttk.Label(f, text="コピー用（詳細+重要情報）:", font=(self.jp_font, 10, "bold")).grid(
             row=row, column=0, columnspan=2, padx=8, pady=(2, 2), sticky=tk.W
         )
@@ -359,21 +326,6 @@ class EdinetMonitorGUI:
         ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=8)
         row += 1
 
-        # XBRL抽出情報
-        ttk.Label(f, text="重要情報:", font=(self.jp_font, 11, "bold")).grid(
-            row=row, column=0, columnspan=2, padx=8, pady=(4, 2), sticky=tk.W
-        )
-        row += 1
-
-        self.xbrl_frame = ttk.Frame(f)
-        self.xbrl_frame.grid(row=row, column=0, columnspan=2, padx=8, pady=2, sticky=tk.EW)
-        self.xbrl_info_label = ttk.Label(self.xbrl_frame, text="書類を選択すると自動抽出します", foreground="#888")
-        self.xbrl_info_label.pack(anchor=tk.W)
-        row += 1
-
-        ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=8)
-        row += 1
-
         # メモ
         ttk.Label(f, text="メモ:", font=(self.jp_font, 10, "bold")).grid(
             row=row, column=0, padx=(8, 4), pady=2, sticky=tk.NE
@@ -386,6 +338,10 @@ class EdinetMonitorGUI:
         memo_btn_frame.grid(row=row, column=1, padx=8, pady=2, sticky=tk.W)
         self.btn_save_memo = ttk.Button(memo_btn_frame, text="メモ保存", command=self._save_memo, state=tk.DISABLED)
         self.btn_save_memo.pack(side=tk.LEFT)
+
+        # detail_labels は空 dict（後方互換用）
+        self.detail_labels = {}
+        self.detail_reason = None
 
         f.columnconfigure(1, weight=1)
 
@@ -494,48 +450,24 @@ class EdinetMonitorGUI:
         self._update_status("running", "コピーしました")
         return "break"
 
-    def _set_detail_text(self, key: str, value: str, fg: str = "#222222"):
-        widget = self.detail_labels[key]
-        widget.configure(state=tk.NORMAL, foreground=fg)
-        widget.delete("1.0", tk.END)
-        widget.insert("1.0", value or "")
-        widget.configure(state=tk.DISABLED)
-
-    def _set_reason_text(self, value: str):
-        self.detail_reason.configure(state=tk.NORMAL, foreground="#222222")
-        self.detail_reason.delete("1.0", tk.END)
-        self.detail_reason.insert("1.0", value or "")
-        self.detail_reason.configure(state=tk.DISABLED)
-
-    def _get_detail_value(self, key: str, fallback: str = "-") -> str:
-        value = self.detail_labels[key].get("1.0", tk.END).strip()
-        return value or fallback
-
-    def _get_reason_value(self, fallback: str = "-") -> str:
-        value = self.detail_reason.get("1.0", tk.END).strip()
-        return value or fallback
-
     def _refresh_copy_blob(self):
         """詳細＋重要情報をまとめたコピー用テキストを更新."""
         if not self.selected_doc:
             text = ""
         else:
+            doc = self.selected_doc
+            target = doc.target_display
             lines = [
-                f"提出時刻: {self._get_detail_value('submit_time')}",
-                f"提出者: {self._get_detail_value('filer')}",
-                f"提出者コード: {self._get_detail_value('filer_ticker')}",
-                f"発行会社: {self._get_detail_value('issuer')}",
-                f"対象会社: {self._get_detail_value('subject')}",
-                f"子会社: {self._get_detail_value('subsidiary')}",
-                f"書類名: {self._get_detail_value('description')}",
-                f"イベント分類: {self._get_detail_value('category')}",
-                f"優先度: {self._get_detail_value('priority')}",
-                f"EDINETコード: {self._get_detail_value('edinet_code')}",
-                f"府令/様式: {self._get_detail_value('ordinance_form')}",
-                f"提出理由: {self._get_reason_value()}",
-                "",
-                "重要情報:",
+                f"[{doc.event_category}] {doc.filer_name}",
+                f"書類名: {doc.doc_description}",
+                f"提出時刻: {doc.submit_datetime}",
             ]
+            if target:
+                lines.append(f"対象: {target}")
+            if doc.current_report_reason:
+                lines.append(f"提出理由: {doc.current_report_reason}")
+            lines.append("")
+            lines.append("重要情報:")
             if self._current_xbrl_data:
                 for key, value in self._current_xbrl_data.items():
                     lines.append(f"  {key}: {value}")
@@ -616,11 +548,55 @@ class EdinetMonitorGUI:
             sort_by=self.sort_var.get(),
         )
 
+        # API検出済みdoc_idのセット（速報行の重複排除用）
+        api_doc_ids = {doc.doc_id for doc in docs}
+
+        # 速報行のうち、まだAPIで検出されていないものを保持
+        surviving_screen_docs: list[Document] = []
+        for iid, doc in list(self._screen_docs.items()):
+            # submit_datetimeとedinet_codeでAPI側と照合
+            matched = False
+            for api_doc in docs:
+                if (api_doc.edinet_code == doc.edinet_code
+                        and api_doc.submit_datetime[:16] == doc.submit_datetime[:16]
+                        and api_doc.doc_description == doc.doc_description):
+                    matched = True
+                    break
+            if not matched:
+                surviving_screen_docs.append(doc)
+
         # キャッシュ更新
         self._doc_cache = {doc.doc_id: doc for doc in docs}
+        for doc in surviving_screen_docs:
+            self._doc_cache[doc.doc_id] = doc
 
         self.tree.delete(*self.tree.get_children())
+
+        # お気に入りフィルター
+        star_only = self.star_filter_var.get()
+
+        # 速報行を先頭に挿入
+        for doc in surviving_screen_docs:
+            cat_display = doc.event_category
+            if doc.tag:
+                cat_display += f"({doc.tag})"
+            tags = ["unread", f"p{doc.priority}", "screen_flash"]
+            self.tree.insert("", tk.END, iid=doc.doc_id, values=(
+                "",
+                doc.submit_time,
+                cat_display,
+                doc.priority_label,
+                doc.target_ticker,
+                doc.target_name,
+                f"[速報] {doc.filer_name}",
+                doc.doc_description,
+            ), tags=tags)
+
+        # DB上の書類を挿入
         for doc in docs:
+            if star_only and not doc.is_starred:
+                continue
+
             tags = []
             if not doc.is_read:
                 tags.append("unread")
@@ -628,24 +604,22 @@ class EdinetMonitorGUI:
                 tags.append("read")
             tags.append(f"p{doc.priority}")
 
-            # 対象会社の表示
-            target = doc.target_display
-
-            # カテゴリ+タグ表示
             cat_display = doc.event_category
             if doc.tag:
                 cat_display += f"({doc.tag})"
 
             self.tree.insert("", tk.END, iid=doc.doc_id, values=(
+                "★" if doc.is_starred else "",
                 doc.submit_time,
                 cat_display,
                 doc.priority_label,
-                target,
+                doc.target_ticker,
+                doc.target_name,
                 doc.filer_name,
                 doc.doc_description,
             ), tags=tags)
 
-        unread = self.storage.get_unread_count()
+        unread = self.storage.get_unread_count() + len(surviving_screen_docs)
         self.unread_label.config(text=f"未読: {unread}")
         if unread > 0:
             self.root.title(f"EDINET Monitor ({unread})")
@@ -669,49 +643,10 @@ class EdinetMonitorGUI:
         target = doc.target_display
         if target:
             header += f" → {target}"
+        if doc.doc_description:
+            header += f"\n{doc.doc_description}"
         self.detail_header.config(text=header)
 
-        # 各フィールド
-        self._set_detail_text("submit_time", doc.submit_datetime)
-        self._set_detail_text("filer", doc.filer_name)
-        self._set_detail_text("filer_ticker", doc.ticker or "-")
-
-        # 発行会社
-        issuer_text = "-"
-        if doc.issuer_name:
-            issuer_text = doc.issuer_name
-            if doc.issuer_sec_code:
-                issuer_text += f" ({doc.issuer_sec_code[:4]})"
-        elif doc.issuer_edinet_code:
-            issuer_text = f"[{doc.issuer_edinet_code}]"
-        self._set_detail_text("issuer", issuer_text)
-
-        # 対象会社
-        subject_text = "-"
-        if doc.subject_name:
-            subject_text = doc.subject_name
-            if doc.subject_sec_code:
-                subject_text += f" ({doc.subject_sec_code[:4]})"
-        elif doc.subject_edinet_code:
-            subject_text = f"[{doc.subject_edinet_code}]"
-        self._set_detail_text("subject", subject_text)
-
-        # 子会社
-        sub_text = doc.subsidiary_name or "-"
-        if not doc.subsidiary_name and doc.subsidiary_edinet_code:
-            sub_text = f"[{doc.subsidiary_edinet_code}]"
-        self._set_detail_text("subsidiary", sub_text)
-
-        self._set_detail_text("description", doc.doc_description)
-        self._set_detail_text("category", doc.event_category)
-        self._set_detail_text("edinet_code", doc.edinet_code or "-")
-        self._set_detail_text("ordinance_form", f"{doc.ordinance_code or '-'} / {doc.form_code or '-'}")
-
-        p_label = doc.priority_label
-        p_color = PRIORITY_COLORS.get(doc.priority, "#616161")
-        self._set_detail_text("priority", p_label, fg=p_color)
-
-        self._set_reason_text(doc.current_report_reason or "-")
         self._current_xbrl_data = None
         self._refresh_copy_blob()
 
@@ -726,6 +661,7 @@ class EdinetMonitorGUI:
         self.btn_save_memo.config(state=tk.NORMAL)
 
         self._update_read_button()
+        self._update_star_button()
 
         # XBRL情報の非同期取得
         if doc.xbrl_flag:
@@ -794,6 +730,15 @@ class EdinetMonitorGUI:
             text = "未読に戻す" if self.selected_doc.is_read else "既読にする"
             self.btn_toggle_read.config(text=text)
 
+    def _update_star_button(self):
+        if self.selected_doc:
+            if self.selected_doc.doc_id.startswith("screen_"):
+                self.btn_star.config(text="★ お気に入り", state=tk.DISABLED)
+            elif self.selected_doc.is_starred:
+                self.btn_star.config(text="★ 解除", state=tk.NORMAL)
+            else:
+                self.btn_star.config(text="☆ お気に入り", state=tk.NORMAL)
+
     def _toggle_read(self):
         if not self.selected_doc:
             return
@@ -801,6 +746,20 @@ class EdinetMonitorGUI:
         self.storage.update_read_status(self.selected_doc.doc_id, new_status)
         self.selected_doc.is_read = new_status
         self._update_read_button()
+        self._refresh_list()
+        if self.tree.exists(self.selected_doc.doc_id):
+            self.tree.selection_set(self.selected_doc.doc_id)
+
+    def _toggle_star(self):
+        if not self.selected_doc:
+            return
+        # screen_で始まるIDはDB未保存なのでスター不可
+        if self.selected_doc.doc_id.startswith("screen_"):
+            return
+        new_status = not self.selected_doc.is_starred
+        self.storage.update_starred(self.selected_doc.doc_id, new_status)
+        self.selected_doc.is_starred = new_status
+        self._update_star_button()
         self._refresh_list()
         if self.tree.exists(self.selected_doc.doc_id):
             self.tree.selection_set(self.selected_doc.doc_id)
@@ -900,6 +859,9 @@ class EdinetMonitorGUI:
     def enqueue_new_docs(self, docs: list[Document]):
         self.msg_queue.put(("new_docs", docs))
 
+    def enqueue_screen_docs(self, screen_observations: list[dict]):
+        self.msg_queue.put(("screen_docs", screen_observations))
+
     def enqueue_status(self, status: str, message: str):
         self.msg_queue.put(("status", status, message))
 
@@ -917,6 +879,13 @@ class EdinetMonitorGUI:
 
         if msg_type == "new_docs":
             docs = msg[1]
+            # API検出時、速報行があれば削除（正式データで置き換え）
+            for doc in docs:
+                screen_iid = f"screen_{doc.edinet_code}_{doc.submit_datetime[:16]}"
+                if self.tree.exists(screen_iid):
+                    self.tree.delete(screen_iid)
+                    self._doc_cache.pop(screen_iid, None)
+                self._screen_docs.pop(screen_iid, None)
             queue_received_at = datetime.now().isoformat()
             for doc in docs:
                 self.storage.record_document_event(doc, "gui_queue_received", event_at=queue_received_at)
@@ -924,13 +893,24 @@ class EdinetMonitorGUI:
             notify_started_at = datetime.now().isoformat()
             for doc in docs:
                 self.storage.record_document_event(doc, "notification_started", event_at=notify_started_at)
-            completion_times = self.notifier.notify_batch(docs)
+            # 速報通知済みのカテゴリは重複通知しない
+            docs_to_notify = []
             for doc in docs:
+                screen_iid = f"screen_{doc.edinet_code}_{doc.submit_datetime[:16]}"
+                if screen_iid not in self._screen_notified:
+                    docs_to_notify.append(doc)
+                else:
+                    self._screen_notified.discard(screen_iid)
+            completion_times = self.notifier.notify_batch(docs_to_notify)
+            for doc in docs_to_notify:
                 completed_at = completion_times.get(doc.doc_id)
                 if completed_at:
                     self.storage.record_document_event(doc, "notification_completed", event_at=completed_at)
             if not self.root.winfo_viewable():
                 self._flash_taskbar()
+
+        elif msg_type == "screen_docs":
+            self._handle_screen_docs(msg[1])
 
         elif msg_type == "status":
             status, message = msg[1], msg[2]
@@ -950,6 +930,129 @@ class EdinetMonitorGUI:
             doc_id, data = msg[1], msg[2]
             if self.selected_doc and self.selected_doc.doc_id == doc_id:
                 self._show_xbrl_info(data)
+
+    def _handle_screen_docs(self, observations: list[dict]):
+        """スクレイピングで新規検出された書類を速報としてGUI表示+通知."""
+        mon_cfg = self.config.get("monitoring", {})
+        classifier = Classifier(
+            enabled_categories=mon_cfg.get("enabled_categories"),
+            skip_corrections=mon_cfg.get("skip_corrections", True),
+        )
+        watchlist = mon_cfg.get("watchlist_sec_codes", [])
+
+        docs_to_notify: list[Document] = []
+        for obs in observations:
+            submit_dt = obs.get("submit_datetime", "")
+            doc_desc = obs.get("doc_description", "")
+            edinet_code = obs.get("edinet_code", "")
+            filer_name = obs.get("filer_name", "")
+            target_text = obs.get("target_text", "")
+            screen_iid = f"screen_{edinet_code}_{submit_dt[:16]}"
+
+            # 既にTreeviewにある速報行ならスキップ
+            if self.tree.exists(screen_iid):
+                continue
+
+            # 既にAPIで検出済みかチェック（doc_cacheのedinet_code+submit+descで照合）
+            already_in_api = False
+            for cached_doc in self._doc_cache.values():
+                if (cached_doc.edinet_code == edinet_code
+                        and cached_doc.submit_datetime[:16] == submit_dt[:16]
+                        and cached_doc.doc_description == doc_desc):
+                    already_in_api = True
+                    break
+            if already_in_api:
+                logger.debug("screen_skip: already in API %s %s", edinet_code, doc_desc)
+                continue
+
+            # classifier用の仮Documentを作成
+            temp_doc = Document(
+                doc_id=screen_iid,
+                edinet_code=edinet_code,
+                sec_code=None,
+                filer_name=filer_name,
+                doc_type_code="",
+                doc_description=doc_desc,
+                submit_datetime=submit_dt,
+                ordinance_code="",
+                form_code="",
+            )
+
+            # 対象会社情報を解決
+            result = self.storage.lookup_edinet_code(edinet_code)
+            if result:
+                temp_doc.sec_code = result[1]
+
+            # 分類
+            category, priority, tag = classifier.classify_with_tag(temp_doc)
+            if category == "その他":
+                continue
+
+            priority = classifier.adjust_priority_for_watchlist(
+                priority, temp_doc.sec_code or "", watchlist,
+            )
+
+            temp_doc.event_category = category
+            temp_doc.priority = priority
+            temp_doc.tag = tag
+
+            # target_textから対象会社情報を補完
+            if target_text:
+                temp_doc.issuer_name = target_text
+                # 対象会社名からsec_code(ティッカー)を逆引き
+                target_lookup = self.storage.lookup_by_company_name(target_text)
+                if target_lookup:
+                    temp_doc.issuer_edinet_code = target_lookup[0]
+                    temp_doc.issuer_sec_code = target_lookup[1] or ""
+                    logger.debug("screen_target_resolved: %s → %s", target_text, target_lookup[1])
+                else:
+                    logger.info("screen_target_unresolved: '%s' not found in edinet_codes", target_text)
+
+            # Treeviewに速報行を挿入（先頭に）
+            cat_display = category
+            if tag:
+                cat_display += f"({tag})"
+
+            submit_time = submit_dt.split(" ", 1)[1][:5] if " " in submit_dt else submit_dt[:5]
+
+            target_display = temp_doc.target_display or ""
+            tags = ["unread", f"p{priority}", "screen_flash"]
+
+            self.tree.insert("", 0, iid=screen_iid, values=(
+                "",
+                submit_time,
+                cat_display,
+                temp_doc.priority_label,
+                temp_doc.target_ticker,
+                temp_doc.target_name,
+                f"[速報] {filer_name}",
+                doc_desc,
+            ), tags=tags)
+            self._doc_cache[screen_iid] = temp_doc
+            self._screen_docs[screen_iid] = temp_doc
+
+            docs_to_notify.append(temp_doc)
+            logger.info(
+                "screen_flash: %s %s %s priority=%d",
+                category, filer_name, doc_desc, priority,
+            )
+
+        # 通知
+        if docs_to_notify:
+            for doc in docs_to_notify:
+                logger.info("screen_notify: %s %s priority=%d", doc.filer_name, doc.doc_description, doc.priority)
+            self.notifier.notify_batch(docs_to_notify)
+            for doc in docs_to_notify:
+                self._screen_notified.add(doc.doc_id)
+
+            # ウィンドウを前面に
+            if not self.root.winfo_viewable():
+                self._flash_taskbar()
+
+            # 未読カウント更新
+            unread = self.storage.get_unread_count() + len(docs_to_notify)
+            self.unread_label.config(text=f"未読: {unread}")
+            self.root.title(f"EDINET Monitor ({unread})")
 
     def _update_status(self, status: str, message: str):
         colors = {

@@ -64,6 +64,7 @@ class Document:
     tag: str = ""  # 補足タグ: "新規", "月次", "特例対象" 等
     # 状態
     is_read: bool = False
+    is_starred: bool = False
     memo: str = ""
     # メタデータ
     raw_json: str = ""

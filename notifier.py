@@ -105,6 +105,7 @@ class Notifier:
 
     def _notify_windows(self, title: str, body: str):
         try:
+            logger.info("notification_send: title=%s", title)
             toast = Notification(
                 app_id=self.APP_ID,
                 title=title,
@@ -114,6 +115,7 @@ class Notifier:
             if self.sound:
                 toast.set_audio(audio.Default, loop=False)
             toast.show()
+            logger.info("notification_sent: title=%s", title)
         except Exception as exc:
             logger.error("Notification failed: %s", exc)
             self._notify_fallback(title, body)

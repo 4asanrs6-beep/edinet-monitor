@@ -312,7 +312,17 @@ class EdinetMonitor:
 
         api_seen_at = response_received_at or datetime.now().isoformat()
         api_docs = [self._parse_item(item) for item in results if item.get("docID")]
-        self.storage.save_api_observations(api_docs, observed_at=api_seen_at)
+        new_api_docs = self.storage.save_api_observations(api_docs, observed_at=api_seen_at)
+        for doc in new_api_docs:
+            logger.info(
+                "api_new: doc_id=%s edinet_code=%s filer=%s doc=%s submit=%s first_seen=%s",
+                doc.doc_id,
+                doc.edinet_code,
+                doc.filer_name,
+                doc.doc_description,
+                doc.submit_datetime,
+                api_seen_at,
+            )
         self.storage.reconcile_screen_observations(api_docs)
 
         new_docs = []

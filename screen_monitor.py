@@ -23,9 +23,11 @@ class EdinetScreenMonitor:
         config: dict,
         storage: Storage,
         on_status_change: Optional[Callable[[str, str], None]] = None,
+        on_new_screen_docs: Optional[Callable[[list[dict]], None]] = None,
     ):
         self.storage = storage
         self.on_status_change = on_status_change or (lambda status, message: None)
+        self.on_new_screen_docs = on_new_screen_docs or (lambda docs: None)
 
         self.enabled = config.get("enabled", False)
         self.interval_sec = config.get("polling_interval_sec", 15)
@@ -76,13 +78,19 @@ class EdinetScreenMonitor:
                 page = browser.new_page(viewport={"width": 1600, "height": 3000})
                 self._poll_with_status(page)
                 while self._running:
-                    if self._is_market_burst_window():
-                        self._run_market_burst(page)
+                    now = datetime.now()
+                    # 次の毎分:01秒までの待ち時間を計算
+                    secs_into_minute = now.second + now.microsecond / 1_000_000
+                    if secs_into_minute < 1:
+                        wait = 1 - secs_into_minute
                     else:
-                        self._interruptible_sleep(self.interval_sec)
-                        if not self._running:
-                            break
-                        self._poll_with_status(page)
+                        wait = 61 - secs_into_minute
+                    # ただし最低でもinterval_sec秒は空ける（連続アクセス防止）
+                    wait = max(wait, self.interval_sec)
+                    self._interruptible_sleep(int(wait))
+                    if not self._running:
+                        break
+                    self._poll_with_status(page)
             finally:
                 browser.close()
 
@@ -119,20 +127,76 @@ class EdinetScreenMonitor:
 
     def _poll_page(self, page: Page) -> int:
         observed_at = datetime.now().isoformat()
-        page.goto(self.search_url, wait_until="networkidle", timeout=120000)
-        self._configure_simple_search(page)
-        page.locator("#W0018BTNBTN_SEARCH").click(force=True)
-        page.wait_for_url("**/WEEE0030.aspx*", timeout=120000)
-        page.wait_for_timeout(8000)
-        body_text = page.locator("body").inner_text(timeout=30000)
-        observations = self._parse_observations(body_text, observed_at)
+        observations = self._try_poll(page, observed_at)
+
+        # 0行の場合はページ状態が壊れている可能性 → 新しいページで再試行
+        if not observations:
+            current_url = page.url
+            logger.warning("Parsed 0 rows (url=%s), retrying with fresh navigation", current_url)
+            page.goto(self.search_url, wait_until="load", timeout=30000)
+            page.wait_for_load_state("networkidle", timeout=30000)
+            observations = self._try_poll(page, observed_at)
+
+        new_obs = []
         if observations:
-            self.storage.save_screen_observations(observations, observed_at=observed_at)
+            new_obs = self.storage.save_screen_observations(observations, observed_at=observed_at)
+            for obs in new_obs:
+                logger.info(
+                    "screen_new: edinet_code=%s filer=%s doc=%s submit=%s first_seen=%s",
+                    obs.get("edinet_code", ""),
+                    obs.get("filer_name", ""),
+                    obs.get("doc_description", ""),
+                    obs.get("submit_datetime", ""),
+                    observed_at,
+                )
+            if new_obs:
+                self.on_new_screen_docs(new_obs)
             self.storage.reconcile_screen_observations(
                 self.storage.get_documents(date=date.today().strftime("%Y-%m-%d"), limit=1000)
             )
-        logger.info("Screen monitor parsed %d rows", len(observations))
+        logger.info("Screen monitor parsed %d rows (new: %d)", len(observations), len(new_obs))
         return len(observations)
+
+    def _try_poll(self, page: Page, observed_at: str) -> list[dict]:
+        """検索ページへ遷移→検索実行→パース。失敗時は空リストを返す。"""
+        # 検索ページへ遷移（domcontentloadedで早期に制御を取る）
+        try:
+            page.goto(self.search_url, wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            logger.warning("goto search page failed, retrying")
+            try:
+                page.goto(self.search_url, wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                logger.warning("goto retry also failed")
+                return []
+
+        # 検索ボタンが出るまで待つ
+        try:
+            page.locator("#W0018BTNBTN_SEARCH").wait_for(state="visible", timeout=30000)
+        except Exception:
+            logger.warning("Search button not found, page may not have loaded")
+            return []
+
+        self._configure_simple_search(page)
+        page.locator("#W0018BTNBTN_SEARCH").click(force=True)
+
+        # 結果ページへの遷移を待つ
+        navigated = False
+        try:
+            page.wait_for_url("**/WEEE0030.aspx*", timeout=30000)
+            navigated = True
+        except Exception:
+            logger.warning("wait_for_url timeout (url=%s)", page.url)
+
+        if not navigated:
+            if "WEEK0010" in page.url:
+                logger.warning("Still on search page, click did not trigger navigation")
+                return []
+            page.wait_for_load_state("networkidle", timeout=15000)
+
+        page.wait_for_timeout(8000)
+        body_text = page.locator("body").inner_text(timeout=30000)
+        return self._parse_observations(body_text, observed_at)
 
     def _configure_simple_search(self, page: Page):
         page.evaluate(

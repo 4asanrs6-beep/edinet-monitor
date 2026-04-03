@@ -88,6 +88,7 @@ def main():
         config=config.get("screen_monitoring", {}),
         storage=storage,
         on_status_change=lambda status, message: logger.info("screen_monitor[%s] %s", status, message),
+        on_new_screen_docs=gui.enqueue_screen_docs,
     )
 
     # GUIにモニターを注入
