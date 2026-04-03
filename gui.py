@@ -194,7 +194,7 @@ class EdinetMonitorGUI:
         ).pack(side=tk.RIGHT, padx=2)
 
     def _create_event_list(self, parent):
-        columns = ("star", "time", "category", "pri", "ticker", "target", "filer", "description")
+        columns = ("star", "time", "category", "pri", "ticker", "target", "filer")
         self.tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="browse")
 
         self.tree.heading("star", text="★", anchor=tk.CENTER)
@@ -204,16 +204,14 @@ class EdinetMonitorGUI:
         self.tree.heading("ticker", text="コード", anchor=tk.CENTER)
         self.tree.heading("target", text="対象", anchor=tk.W)
         self.tree.heading("filer", text="提出者", anchor=tk.W)
-        self.tree.heading("description", text="書類名", anchor=tk.W)
 
         self.tree.column("star", width=30, minwidth=25, stretch=False, anchor=tk.CENTER)
         self.tree.column("time", width=50, minwidth=45, stretch=False)
-        self.tree.column("category", width=100, minwidth=70, stretch=False)
+        self.tree.column("category", width=120, minwidth=80, stretch=False)
         self.tree.column("pri", width=40, minwidth=35, stretch=False, anchor=tk.CENTER)
         self.tree.column("ticker", width=50, minwidth=40, stretch=False, anchor=tk.CENTER)
-        self.tree.column("target", width=160, minwidth=100)
-        self.tree.column("filer", width=150, minwidth=100)
-        self.tree.column("description", width=130, minwidth=80)
+        self.tree.column("target", width=200, minwidth=120)
+        self.tree.column("filer", width=200, minwidth=120)
 
         self.tree.tag_configure("unread", font=(self.jp_font, 10, "bold"))
         self.tree.tag_configure("read", foreground="#888888")
@@ -593,7 +591,6 @@ class EdinetMonitorGUI:
                 doc.target_ticker,
                 doc.target_name,
                 f"[速報] {doc.filer_name}",
-                doc.doc_description,
             ), tags=tags)
 
         # DB上の書類を挿入
@@ -620,7 +617,6 @@ class EdinetMonitorGUI:
                 doc.target_ticker,
                 doc.target_name,
                 doc.filer_name,
-                doc.doc_description,
             ), tags=tags)
 
         unread = self.storage.get_unread_count() + len(surviving_screen_docs)
@@ -1032,7 +1028,6 @@ class EdinetMonitorGUI:
                 temp_doc.target_ticker,
                 temp_doc.target_name,
                 f"[速報] {filer_name}",
-                doc_desc,
             ), tags=tags)
             self._doc_cache[screen_iid] = temp_doc
             self._screen_docs[screen_iid] = temp_doc
