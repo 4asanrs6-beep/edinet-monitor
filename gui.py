@@ -654,11 +654,12 @@ class EdinetMonitorGUI:
         if doc.memo:
             self.memo_text.insert("1.0", doc.memo)
 
-        self.btn_pdf.config(state=tk.NORMAL if doc.pdf_flag else tk.DISABLED, text="PDF表示")
-        self.btn_edinet.config(state=tk.NORMAL)
-        self.btn_toggle_read.config(state=tk.NORMAL)
-        self.btn_raw.config(state=tk.NORMAL if doc.raw_json else tk.DISABLED)
-        self.btn_save_memo.config(state=tk.NORMAL)
+        is_screen = doc.doc_id.startswith("screen_")
+        self.btn_pdf.config(state=tk.NORMAL if doc.pdf_flag and not is_screen else tk.DISABLED, text="PDF表示")
+        self.btn_edinet.config(state=tk.NORMAL, text="EDINET検索" if is_screen else "EDINET原文")
+        self.btn_toggle_read.config(state=tk.NORMAL if not is_screen else tk.DISABLED)
+        self.btn_raw.config(state=tk.NORMAL if doc.raw_json and not is_screen else tk.DISABLED)
+        self.btn_save_memo.config(state=tk.NORMAL if not is_screen else tk.DISABLED)
 
         self._update_read_button()
         self._update_star_button()
@@ -796,11 +797,12 @@ class EdinetMonitorGUI:
         if not self.selected_doc:
             return
         doc_id = self.selected_doc.doc_id
-        # EDINET書類閲覧ページ
-        url = f"https://disclosure2.edinet-fsa.go.jp/WZEK0040.aspx?S100{doc_id[4:]}" if doc_id.startswith("S100") else None
-        if not url:
-            # フォールバック: EDINET検索ページ
-            url = "https://disclosure.edinet-fsa.go.jp/"
+        if doc_id.startswith("S100"):
+            # EDINET書類閲覧ページ
+            url = f"https://disclosure2.edinet-fsa.go.jp/WZEK0040.aspx?{doc_id}"
+        else:
+            # 速報行: EDINET書類検索ページを開く（当日の開示一覧にすぐアクセスできる）
+            url = "https://disclosure2.edinet-fsa.go.jp/WEEK0010.aspx"
         webbrowser.open(url)
 
     def _show_raw_json(self):
