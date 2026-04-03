@@ -81,7 +81,7 @@ class EdinetMonitorGUI:
         x = (sw - w) // 2
         y = (sh - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
-        self.root.minsize(900, 550)
+        self.root.minsize(600, 400)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _setup_styles(self):
