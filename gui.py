@@ -268,23 +268,27 @@ class EdinetMonitorGUI:
         ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=4)
         row += 1
 
-        # アクションボタン（最上部に配置）
-        btn_frame = ttk.Frame(f)
-        btn_frame.grid(row=row, column=0, columnspan=2, padx=8, pady=4, sticky=tk.W)
+        # アクションボタン（最上部に配置、2行に分けて狭くても全ボタン表示）
+        btn_row1 = ttk.Frame(f)
+        btn_row1.grid(row=row, column=0, columnspan=2, padx=8, pady=(4, 2), sticky=tk.W)
 
-        self.btn_pdf = ttk.Button(btn_frame, text="PDF表示", command=self._open_pdf, state=tk.DISABLED)
+        self.btn_pdf = ttk.Button(btn_row1, text="PDF表示", command=self._open_pdf, state=tk.DISABLED)
         self.btn_pdf.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.btn_edinet = ttk.Button(btn_frame, text="EDINET原文", command=self._open_edinet, state=tk.DISABLED)
+        self.btn_edinet = ttk.Button(btn_row1, text="EDINET原文", command=self._open_edinet, state=tk.DISABLED)
         self.btn_edinet.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.btn_toggle_read = ttk.Button(btn_frame, text="既読にする", command=self._toggle_read, state=tk.DISABLED)
+        self.btn_toggle_read = ttk.Button(btn_row1, text="既読にする", command=self._toggle_read, state=tk.DISABLED)
         self.btn_toggle_read.pack(side=tk.LEFT, padx=(0, 4))
+        row += 1
 
-        self.btn_star = ttk.Button(btn_frame, text="★ お気に入り", command=self._toggle_star, state=tk.DISABLED)
+        btn_row2 = ttk.Frame(f)
+        btn_row2.grid(row=row, column=0, columnspan=2, padx=8, pady=(0, 4), sticky=tk.W)
+
+        self.btn_star = ttk.Button(btn_row2, text="★ お気に入り", command=self._toggle_star, state=tk.DISABLED)
         self.btn_star.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.btn_raw = ttk.Button(btn_frame, text="生データ", command=self._show_raw_json, state=tk.DISABLED)
+        self.btn_raw = ttk.Button(btn_row2, text="生データ", command=self._show_raw_json, state=tk.DISABLED)
         self.btn_raw.pack(side=tk.LEFT, padx=(0, 4))
         row += 1
 
