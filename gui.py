@@ -242,11 +242,14 @@ class EdinetMonitorGUI:
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
-        canvas.create_window((0, 0), window=self.detail_frame, anchor=tk.NW)
+        self._detail_canvas = canvas
+        self._detail_window_id = canvas.create_window((0, 0), window=self.detail_frame, anchor=tk.NW)
         canvas.configure(yscrollcommand=scrollbar.set)
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(self._detail_window_id, width=e.width))
 
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -260,7 +263,8 @@ class EdinetMonitorGUI:
 
         # ヘッダー
         self.detail_header = ttk.Label(f, text="書類を選択してください", style="Header.TLabel")
-        self.detail_header.grid(row=row, column=0, columnspan=2, padx=8, pady=(8, 4), sticky=tk.W)
+        self.detail_header.grid(row=row, column=0, columnspan=2, padx=8, pady=(8, 4), sticky=tk.EW)
+        self.detail_header.bind("<Configure>", lambda e: self.detail_header.configure(wraplength=max(e.width - 4, 50)))
         row += 1
 
         ttk.Separator(f, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=4)
@@ -317,7 +321,7 @@ class EdinetMonitorGUI:
         self.copy_blob_text = tk.Text(
             f,
             height=8,
-            width=64,
+            width=10,
             wrap=tk.WORD,
             font=(self.jp_font, 10),
         )
@@ -332,7 +336,7 @@ class EdinetMonitorGUI:
         ttk.Label(f, text="メモ:", font=(self.jp_font, 10, "bold")).grid(
             row=row, column=0, padx=(8, 4), pady=2, sticky=tk.NE
         )
-        self.memo_text = tk.Text(f, height=5, width=50, font=(self.jp_font, 10), wrap=tk.WORD)
+        self.memo_text = tk.Text(f, height=5, width=10, font=(self.jp_font, 10), wrap=tk.WORD)
         self.memo_text.grid(row=row, column=1, padx=8, pady=2, sticky=tk.EW)
         row += 1
 
@@ -721,8 +725,9 @@ class EdinetMonitorGUI:
             elif "⚠" in value:
                 fg = "#D32F2F"
 
-            val = ttk.Label(row_frame, text=value, foreground=fg, wraplength=350)
-            val.pack(side=tk.LEFT)
+            val = ttk.Label(row_frame, text=value, foreground=fg)
+            val.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            val.bind("<Configure>", lambda e, w=val: w.configure(wraplength=max(e.width - 4, 50)))
         self._current_xbrl_data = data
         self._refresh_copy_blob()
 

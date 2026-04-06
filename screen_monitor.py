@@ -63,6 +63,7 @@ class EdinetScreenMonitor:
         logger.info("Screen monitor stopped")
 
     def poll_once(self) -> int:
+        self._results_url = None
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(channel=self.channel, headless=True)
             try:
@@ -76,23 +77,51 @@ class EdinetScreenMonitor:
             browser = playwright.chromium.launch(channel=self.channel, headless=True)
             try:
                 page = browser.new_page(viewport={"width": 1600, "height": 3000})
+                self._results_url: str | None = None
                 self._poll_with_status(page)
                 while self._running:
-                    now = datetime.now()
-                    # 次の毎分:01秒までの待ち時間を計算
-                    secs_into_minute = now.second + now.microsecond / 1_000_000
-                    if secs_into_minute < 1:
-                        wait = 1 - secs_into_minute
-                    else:
-                        wait = 61 - secs_into_minute
-                    # ただし最低でもinterval_sec秒は空ける（連続アクセス防止）
-                    wait = max(wait, self.interval_sec)
-                    self._interruptible_sleep(int(wait))
+                    # 次の毎分:01秒まで待つ（EDINET画面は毎分:00更新）
+                    self._sleep_until_next_minute_boundary()
+                    if not self._running:
+                        break
+                    # :01付近で1回目
+                    self._poll_with_status(page)
+                    if not self._running:
+                        break
+                    # 5秒後に2回目（取りこぼし対策）
+                    self._interruptible_sleep(5)
+                    if not self._running:
+                        break
+                    self._poll_with_status(page)
+                    if not self._running:
+                        break
+                    # :30付近で3回目
+                    self._sleep_until_second(30)
                     if not self._running:
                         break
                     self._poll_with_status(page)
             finally:
                 browser.close()
+
+    def _sleep_until_next_minute_boundary(self):
+        """次の毎分:01秒まで待つ。最低でもinterval_sec秒は空ける。"""
+        now = datetime.now()
+        secs_into_minute = now.second + now.microsecond / 1_000_000
+        if secs_into_minute < 1:
+            wait = 1 - secs_into_minute
+        else:
+            wait = 61 - secs_into_minute
+        wait = max(wait, self.interval_sec)
+        self._interruptible_sleep(int(wait))
+
+    def _sleep_until_second(self, target_second: int):
+        """現在の分の指定秒まで待つ。既に過ぎていたらスキップ。"""
+        now = datetime.now()
+        if now.second >= target_second:
+            return
+        wait = target_second - now.second - now.microsecond / 1_000_000
+        if wait > 0:
+            self._interruptible_sleep(int(wait))
 
     def _poll_with_status(self, page: Page):
         try:
@@ -129,12 +158,11 @@ class EdinetScreenMonitor:
         observed_at = datetime.now().isoformat()
         observations = self._try_poll(page, observed_at)
 
-        # 0行の場合はページ状態が壊れている可能性 → 新しいページで再試行
+        # 0行の場合はページ状態が壊れている可能性 → フル遷移で再試行
         if not observations:
             current_url = page.url
             logger.warning("Parsed 0 rows (url=%s), retrying with fresh navigation", current_url)
-            page.goto(self.search_url, wait_until="load", timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=30000)
+            self._results_url = None  # フル遷移に戻す
             observations = self._try_poll(page, observed_at)
 
         new_obs = []
@@ -158,8 +186,42 @@ class EdinetScreenMonitor:
         return len(observations)
 
     def _try_poll(self, page: Page, observed_at: str) -> list[dict]:
-        """検索ページへ遷移→検索実行→パース。失敗時は空リストを返す。"""
-        # 検索ページへ遷移（domcontentloadedで早期に制御を取る）
+        """検索ページへ遷移→検索実行→パース。失敗時は空リストを返す。
+
+        _results_url が設定済みの場合はリロードだけで済ませる（高速パス）。
+        """
+        if self._results_url:
+            return self._try_poll_fast(page, observed_at)
+        return self._try_poll_full(page, observed_at)
+
+    def _try_poll_fast(self, page: Page, observed_at: str) -> list[dict]:
+        """結果ページをリロードしてパースするだけの高速パス。"""
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            logger.warning("Fast reload failed, falling back to full navigation")
+            self._results_url = None
+            return self._try_poll_full(page, observed_at)
+
+        # 結果テーブルの出現を待つ（最大5秒）
+        try:
+            page.locator("table").first.wait_for(state="visible", timeout=5000)
+        except Exception:
+            pass
+        # DOMが安定するのを少し待つ
+        page.wait_for_timeout(1000)
+
+        body_text = page.locator("body").inner_text(timeout=10000)
+        observations = self._parse_observations(body_text, observed_at)
+        if not observations:
+            # リロードで取れなかった場合はフル遷移にフォールバック
+            logger.warning("Fast reload returned 0 rows, falling back to full navigation")
+            self._results_url = None
+        return observations
+
+    def _try_poll_full(self, page: Page, observed_at: str) -> list[dict]:
+        """検索ページからフル遷移する通常パス。"""
+        # 検索ページへ遷移
         try:
             page.goto(self.search_url, wait_until="domcontentloaded", timeout=60000)
         except Exception:
@@ -194,9 +256,22 @@ class EdinetScreenMonitor:
                 return []
             page.wait_for_load_state("networkidle", timeout=15000)
 
-        page.wait_for_timeout(8000)
+        # 結果テーブルの出現を待つ
+        try:
+            page.locator("table").first.wait_for(state="visible", timeout=8000)
+        except Exception:
+            pass
+        page.wait_for_timeout(2000)
+
         body_text = page.locator("body").inner_text(timeout=30000)
-        return self._parse_observations(body_text, observed_at)
+        observations = self._parse_observations(body_text, observed_at)
+
+        # 結果ページURLを記録（次回からリロードだけで済む）
+        if observations:
+            self._results_url = page.url
+            logger.info("Results page URL captured: %s", self._results_url)
+
+        return observations
 
     def _configure_simple_search(self, page: Page):
         page.evaluate(
